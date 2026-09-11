@@ -204,16 +204,26 @@ export const KO_MESSAGES = {
     "버튼을 눌러야 이 키를 채팅에서 사용할 수 있어요.",
   "settings.plugin.ai_chat.guide.title": "빠른 안내",
   "settings.plugin.ai_chat.guide.connection_label": "연결:",
-  "settings.plugin.ai_chat.guide.connection_before_link":
-    "“Kuku”는 현재 로그인한 계정을 사용해요. 이미 Kuku 계정을 쓰고 있다면 이게 가장 쉬워요. 한 번 로그인하면 대부분 이 화면을 더 건드릴 필요가 없어요. “내 Gemini API 키”는 Google",
-  "settings.plugin.ai_chat.guide.connection_after_link":
-    "에서 발급한 개인 키용이에요(무료 티어로도 테스트 가능해요).",
   "settings.plugin.ai_chat.guide.save_label": "저장",
-  "settings.plugin.ai_chat.guide.save_text":
-    "은 설정을 바꿀 때마다 꼭 눌러 주세요. 조용한 성공 상태면 정상이에요.",
   "settings.plugin.ai_chat.guide.open_chat_label": "채팅 열기:",
-  "settings.plugin.ai_chat.guide.open_chat_text":
-    "오른쪽 사이드바 탭 또는 명령으로 패널을 연 뒤, 하단 입력창에 질문을 입력하세요.",
+  "settings.plugin.ai_chat.guide.gemini.connection":
+    "Google AI Studio에서 개인 API 키를 만든 뒤 아래 입력란에 붙여 넣으세요.",
+  "settings.plugin.ai_chat.guide.gemini.save":
+    "키를 바꾼 뒤 저장해야 이 기기의 채팅에서 사용할 수 있어요.",
+  "settings.plugin.ai_chat.guide.gemini.open_chat":
+    "오른쪽 사이드바를 열고 Gemini에 메시지를 보내세요.",
+  "settings.plugin.ai_chat.guide.openai.connection":
+    "스트리밍 Chat Completions 베이스 URL을 설정하세요. OpenAI와 Ollama는 릴리스 때 검증하며, LM Studio, mlx_lm.server, OpenRouter 같은 서버도 작동할 것으로 예상해요.",
+  "settings.plugin.ai_chat.guide.openai.save":
+    "서버가 모델 조회를 지원하면 목록을 불러오고 모델을 선택한 뒤 연결을 저장하세요.",
+  "settings.plugin.ai_chat.guide.openai.open_chat":
+    "오른쪽 사이드바를 열고 선택한 호환 모델에 메시지를 보내세요.",
+  "settings.plugin.ai_chat.guide.remote.connection":
+    "Kuku 계정에 로그인하고 AI 채팅 권한을 허용하세요.",
+  "settings.plugin.ai_chat.guide.remote.save":
+    "Kuku를 선택해 저장하세요. 로컬 제공자 키는 필요하지 않아요.",
+  "settings.plugin.ai_chat.guide.remote.open_chat":
+    "오른쪽 사이드바를 열고 Kuku 세션으로 채팅하세요.",
   "settings.plugin.ai_chat.account_banner.title": "Kuku 계정이 있나요?",
   "settings.plugin.ai_chat.account_banner.description":
     "로그인 후 “Kuku (로그인됨)”을 고르면 바로 채팅돼요. 이 화면은 연결 방식/키 선택과 저장만 담당해요. 로그인, 세션, AI 권한은 계정 탭에서 관리해요.",
@@ -223,11 +233,21 @@ export const KO_MESSAGES = {
     "로그인되어 있다면 Kuku를 먼저 추천해요. 필요한 경우에만 개인 키로 바꾸세요.",
   "settings.plugin.ai_chat.connection.option_remote": "Kuku (로그인됨) - 가장 쉬워요",
   "settings.plugin.ai_chat.connection.option_gemini": "내 Gemini API 키",
+  "settings.plugin.ai_chat.connection.option_openai": "OpenAI 호환 서버",
   "settings.plugin.ai_chat.model.label": "모델",
   "settings.plugin.ai_chat.model.remote_description":
     "현재 Gemini 3.1 Flash Lite를 사용해요. 앱 업데이트에 따라 바뀔 수 있어요.",
   "settings.plugin.ai_chat.model.gemini_description":
     "개인 키 모드에서도 현재 Gemini 3.1 Flash Lite를 사용해요. 앱 업데이트에 따라 바뀔 수 있어요.",
+  "settings.plugin.ai_chat.model.openai_description":
+    "호환 서버가 알려 주는 모델 ID를 정확히 입력하세요.",
+  "settings.plugin.ai_chat.model.openai_placeholder": "gpt-5-nano 또는 qwen3.5:4b",
+  "settings.plugin.ai_chat.models.load": "모델 불러오기",
+  "settings.plugin.ai_chat.models.loading": "모델을 불러오는 중…",
+  "settings.plugin.ai_chat.openai_base_url.label": "베이스 URL",
+  "settings.plugin.ai_chat.openai_base_url.description":
+    "키가 있으면 반드시 HTTPS를 사용하세요. 키 없는 HTTP는 로컬 또는 사설 호스트에서만 허용돼요.",
+  "settings.plugin.ai_chat.openai_base_url.placeholder": "https://api.openai.com/v1",
   "settings.plugin.ai_chat.remote_banner.title": "Kuku 모드 사용 중",
   "settings.plugin.ai_chat.remote_banner.description":
     "이 화면에 API 키를 넣을 필요가 없어요. Kuku / Google 로그인으로 이미 인증되었어요. 채팅 권한 문제가 보이면 설정의 계정 탭을 확인해 주세요.",
@@ -238,12 +258,21 @@ export const KO_MESSAGES = {
     "키를 만들고 복사해 주세요. 전체 값은 다시 보기 어려울 수 있어요.",
   "settings.plugin.ai_chat.gemini_banner.step3":
     "아래에 붙여넣고 저장하면 이 기기의 앱에 보관돼요.",
-  "settings.plugin.ai_chat.api_key.label": "Gemini API 키",
+  "settings.plugin.ai_chat.api_key.label_gemini": "Gemini API 키",
+  "settings.plugin.ai_chat.api_key.label_openai": "OpenAI 호환 API 키",
   "settings.plugin.ai_chat.api_key.description":
     "기본은 숨김 상태예요. 눈 아이콘으로 전체가 제대로 붙었는지 확인해 주세요.",
   "settings.plugin.ai_chat.api_key.placeholder": "키를 여기에 붙여넣어 주세요",
   "settings.plugin.ai_chat.api_key.hide": "키 숨기기",
   "settings.plugin.ai_chat.api_key.show": "키 보기",
+  "settings.plugin.ai_chat.api_key.requirement_required": "필수",
+  "settings.plugin.ai_chat.api_key.requirement_optional": "선택",
+  "settings.plugin.ai_chat.openai_banner.key_title": "API 키가 필요해요",
+  "settings.plugin.ai_chat.openai_banner.key_description":
+    "이 호스트에 연결하려면 API 키가 필요해요.",
+  "settings.plugin.ai_chat.openai_banner.model_title": "모델이 필요해요",
+  "settings.plugin.ai_chat.openai_banner.model_description":
+    "모델 ID를 입력하거나 불러온 뒤 설정을 저장하세요.",
   "settings.plugin.ai_chat.tools.title": "AI가 할 수 있는 일",
   "settings.plugin.ai_chat.tools.description":
     "AI가 대신 사용할 수 있는 도구 목록이에요. 노트 검색, 파일 읽기/수정 등을 수행하고, 위험한 작업은 필요 시 확인을 요청해요.",
@@ -452,6 +481,8 @@ export const KO_MESSAGES = {
   "settings.about.version.unknown": "알 수 없음",
   "settings.about.metric.version": "버전",
   "settings.about.metric.license": "라이선스",
+  "settings.about.h4_build": "H4 빌드 {{label}}",
+  "settings.about.updates_via_homebrew": "Homebrew로 업데이트",
 
   "app.title.vault_fallback": "지식보관함",
   "app.action.toggle_left_panel": "왼쪽 패널 열기/닫기",
@@ -608,15 +639,18 @@ export const KO_MESSAGES = {
   "chat.thinking": "생각 중",
   "chat.attachment.selected_text": "선택한 텍스트",
   "chat.panel.setup.title": "AI 채팅을 시작해요",
-  "chat.panel.setup.description": "Gemini API 키를 쓰거나 Kuku 계정으로 로그인해 연결할 수 있어요.",
+  "chat.panel.setup.description": "채팅을 시작하기 전에 선택한 제공자 설정을 마쳐 주세요.",
   "chat.panel.setup.opening": "열고 있어요...",
   "chat.panel.setup.sign_in": "Kuku로 로그인",
   "chat.panel.setup.remote_hint":
     "Kuku Remote는 한 번 로그인하면 끝나요. 이 기기에서 로컬 API 키가 필요 없어요.",
   "chat.panel.setup.or": "또는",
   "chat.panel.setup.open_settings": "설정 열기",
-  "chat.panel.setup.byok_hint":
-    "또는 설정에서 Gemini 키를 추가해 이 기기 전용 BYOK로 사용할 수 있어요.",
+  "chat.panel.setup.byok_hint": "설정에서 Gemini 또는 OpenAI 호환 서버를 구성할 수도 있어요.",
+  "chat.panel.setup.prompt_remote": "Kuku 계정에 로그인하고 AI 채팅 권한을 허용해 주세요.",
+  "chat.panel.setup.prompt_gemini": "설정에서 Gemini API 키를 추가하고 저장해 주세요.",
+  "chat.panel.setup.prompt_openai":
+    "OpenAI 호환 연결의 엔드포인트, 필요한 API 키, 모델을 확인해 주세요.",
   "chat.panel.permission.title": "권한 설정이 필요해요",
   "chat.panel.permission.description":
     "계정 → 권한에서 AI 채팅이 Kuku 세션을 사용할 수 있게 허용해 주세요.",

@@ -12,6 +12,8 @@ import {
   DEFAULT_ROUND_LIMIT,
   DEFAULT_SERVER_URL,
   createDefaultAiConfig,
+  modelForProvider,
+  normalizeApiKey,
   normalizeAiConfig,
 } from "./config";
 import { createContextSnapshotSource } from "./context_snapshot";
@@ -20,6 +22,8 @@ import { hasRespondingSession } from "./responding_state";
 import { prepareSelectedTextForSend } from "./selected_text_context";
 import type {
   AiConfig,
+  AiProvider,
+  AiSettingsDraft,
   ChatApprovalMessage,
   ChatFileAttachmentDraft,
   ChatMessage,
@@ -46,6 +50,19 @@ const BUSY_SESSION_STATUSES: ChatSessionState["status"][] = [
   "applying",
 ];
 
+function settingsDraftFromConfig(config: AiConfig): AiSettingsDraft {
+  return {
+    provider: config.provider ?? DEFAULT_PROVIDER,
+    apiKey: config.apiKey ?? "",
+    openaiApiKey: config.openaiApiKey ?? "",
+    openaiBaseUrl: config.openaiBaseUrl ?? "",
+    openaiModel: config.openaiModel ?? "",
+    serverUrl: config.serverUrl ?? DEFAULT_SERVER_URL,
+  };
+}
+
+const defaultAiConfig = createDefaultAiConfig();
+
 const [chatState, setChatState] = createStore<ChatStoreState>({
   selectedMode: "ask",
   activeSessionId: null,
@@ -54,9 +71,16 @@ const [chatState, setChatState] = createStore<ChatStoreState>({
   isSendingMessage: false,
   config: {
     apiKey: "",
+    openaiApiKey: "",
+    openaiBaseUrl: defaultAiConfig.openaiBaseUrl ?? "",
+    openaiModel: "",
     provider: DEFAULT_PROVIDER,
     serverUrl: DEFAULT_SERVER_URL,
     model: DEFAULT_MODEL,
+    settingsDraft: settingsDraftFromConfig(defaultAiConfig),
+    modelSuggestions: [],
+    modelsLoading: false,
+    modelsError: null,
     rawConfig: {},
     loading: false,
     saving: false,
@@ -71,11 +95,19 @@ let lastResponding = false;
 setContextKey("aiResponding", false);
 
 function createDefaultConfigState(): ChatStoreState["config"] {
+  const config = createDefaultAiConfig();
   return {
     apiKey: "",
+    openaiApiKey: "",
+    openaiBaseUrl: config.openaiBaseUrl ?? "",
+    openaiModel: "",
     provider: DEFAULT_PROVIDER,
     serverUrl: DEFAULT_SERVER_URL,
     model: DEFAULT_MODEL,
+    settingsDraft: settingsDraftFromConfig(config),
+    modelSuggestions: [],
+    modelsLoading: false,
+    modelsError: null,
     rawConfig: {},
     loading: false,
     saving: false,
@@ -84,6 +116,18 @@ function createDefaultConfigState(): ChatStoreState["config"] {
     toolsError: null,
     availableTools: [],
   };
+}
+
+function applyConfigToState(config: AiConfig): void {
+  setChatState("config", "rawConfig", config as unknown as Record<string, unknown>);
+  setChatState("config", "apiKey", config.apiKey ?? "");
+  setChatState("config", "openaiApiKey", config.openaiApiKey ?? "");
+  setChatState("config", "openaiBaseUrl", config.openaiBaseUrl ?? "");
+  setChatState("config", "openaiModel", config.openaiModel ?? "");
+  setChatState("config", "provider", config.provider ?? DEFAULT_PROVIDER);
+  setChatState("config", "serverUrl", config.serverUrl ?? DEFAULT_SERVER_URL);
+  setChatState("config", "model", modelForProvider(config.provider ?? DEFAULT_PROVIDER, config));
+  setChatState("config", "settingsDraft", settingsDraftFromConfig(config));
 }
 
 function getActiveSession(): ChatSessionState | null {
@@ -657,61 +701,92 @@ async function loadConfig(): Promise<void> {
       secureKeys: [...AI_CHAT_SECURE_KEYS],
       normalize: (raw) => normalizeAiConfig(raw),
     });
-    // Server URL and model are pinned to the build's bundled defaults —
-    // they identify which backend this build targets and must not drift
-    // into an older saved value from a previous variant or stale install.
+    // Kuku Remote remains pinned to the build's backend. OpenAI-compatible
+    // model selection is user-owned and must round-trip unchanged.
     config.serverUrl = DEFAULT_SERVER_URL;
-    config.model = DEFAULT_MODEL;
+    config.model = modelForProvider(config.provider ?? DEFAULT_PROVIDER, config);
     await savePluginSettings(AI_CHAT_SETTINGS_PLUGIN_ID, config, [...AI_CHAT_SECURE_KEYS]);
     await invoke<void>("plugin:kuku-ai|ai_set_config", { config });
-    setChatState("config", "rawConfig", config as unknown as Record<string, unknown>);
-    setChatState("config", "apiKey", config.apiKey ?? "");
-    setChatState("config", "provider", config.provider ?? DEFAULT_PROVIDER);
-    setChatState("config", "serverUrl", config.serverUrl);
-    setChatState("config", "model", config.model);
+    applyConfigToState(config);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const defaults = createDefaultAiConfig();
-    setChatState("config", "apiKey", defaults.apiKey ?? "");
-    setChatState("config", "provider", defaults.provider ?? DEFAULT_PROVIDER);
-    setChatState("config", "serverUrl", defaults.serverUrl ?? DEFAULT_SERVER_URL);
-    setChatState("config", "model", defaults.model);
-    setChatState("config", "rawConfig", {});
+    applyConfigToState(defaults);
     setChatState("config", "error", message);
   } finally {
     setChatState("config", "loading", false);
   }
 }
 
-async function saveConfig(
-  nextProvider: "gemini" | "remote",
-  nextApiKey: string,
-  nextServerUrl: string,
-): Promise<void> {
+function setSettingsDraft(patch: Partial<AiSettingsDraft>): void {
+  setChatState("config", "settingsDraft", (current) => ({ ...current, ...patch }));
+}
+
+function isSettingsDraftUnsaved(): boolean {
+  const saved = settingsDraftFromConfig(normalizeAiConfig(chatState.config.rawConfig));
+  const draft = chatState.config.settingsDraft;
+  return (
+    draft.provider !== saved.provider ||
+    draft.apiKey !== saved.apiKey ||
+    draft.openaiApiKey !== saved.openaiApiKey ||
+    draft.openaiBaseUrl !== saved.openaiBaseUrl ||
+    draft.openaiModel !== saved.openaiModel ||
+    draft.serverUrl !== saved.serverUrl
+  );
+}
+
+async function saveSettingsDraft(): Promise<void> {
   setChatState("config", "saving", true);
   setChatState("config", "error", null);
   try {
     const currentConfig = chatState.config.rawConfig as Partial<AiConfig>;
-    const nextConfig: AiConfig = {
-      provider: nextProvider,
-      apiKey: nextApiKey || null,
-      model: DEFAULT_MODEL,
-      serverUrl: nextServerUrl || DEFAULT_SERVER_URL,
+    const draft = chatState.config.settingsDraft;
+    const normalizedApiKey = normalizeApiKey(draft.apiKey);
+    const normalizedOpenAiApiKey = normalizeApiKey(draft.openaiApiKey);
+    const nextConfig = normalizeAiConfig({
+      ...currentConfig,
+      provider: draft.provider,
+      apiKey: normalizedApiKey,
+      openaiApiKey: normalizedOpenAiApiKey,
+      openaiBaseUrl: draft.openaiBaseUrl,
+      openaiModel: draft.openaiModel,
+      model: modelForProvider(draft.provider, { openaiModel: draft.openaiModel }),
+      serverUrl: draft.serverUrl || DEFAULT_SERVER_URL,
       roundLimit: currentConfig.roundLimit ?? DEFAULT_ROUND_LIMIT,
       proxyToolTimeoutMs: currentConfig.proxyToolTimeoutMs ?? DEFAULT_PROXY_TIMEOUT_MS,
-    };
+    });
     await savePluginSettings(AI_CHAT_SETTINGS_PLUGIN_ID, nextConfig, [...AI_CHAT_SECURE_KEYS]);
     await invoke<void>("plugin:kuku-ai|ai_set_config", { config: nextConfig });
-    setChatState("config", "rawConfig", nextConfig as unknown as Record<string, unknown>);
-    setChatState("config", "apiKey", nextApiKey);
-    setChatState("config", "provider", nextProvider);
-    setChatState("config", "serverUrl", nextServerUrl || DEFAULT_SERVER_URL);
-    setChatState("config", "model", nextConfig.model);
+    applyConfigToState(nextConfig);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     setChatState("config", "error", message);
   } finally {
     setChatState("config", "saving", false);
+  }
+}
+
+async function switchProviderAndSave(provider: AiProvider): Promise<void> {
+  setSettingsDraft({ provider });
+  await saveSettingsDraft();
+}
+
+async function loadModelSuggestions(): Promise<void> {
+  const draft = chatState.config.settingsDraft;
+  setChatState("config", "modelsLoading", true);
+  setChatState("config", "modelsError", null);
+  try {
+    const models = await invoke<string[]>("plugin:kuku-ai|ai_list_models", {
+      baseUrl: draft.openaiBaseUrl,
+      apiKey: normalizeApiKey(draft.openaiApiKey),
+    });
+    setChatState("config", "modelSuggestions", models);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setChatState("config", "modelSuggestions", []);
+    setChatState("config", "modelsError", message);
+  } finally {
+    setChatState("config", "modelsLoading", false);
   }
 }
 
@@ -779,21 +854,26 @@ export {
   finishSession,
   getActiveSession,
   resetChatState,
+  isSettingsDraftUnsaved,
   loadConfig,
+  loadModelSuggestions,
   loadTools,
   removeFileAttachment,
   resetToSession,
   resolveApproval,
-  saveConfig,
+  saveSettingsDraft,
   sendMessage,
   setAutoApprove,
   setDraft,
+  setSettingsDraft,
   setError,
   isSessionBusy,
   setSelectedMode,
   setSessionStatus,
   startToolCall,
+  settingsDraftFromConfig,
   switchMode,
+  switchProviderAndSave,
   toggleApprovalExpanded,
   toggleToolExpanded,
   updateApprovalStatus,

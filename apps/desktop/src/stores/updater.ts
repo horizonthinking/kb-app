@@ -2,6 +2,19 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { createStore } from "solid-js/store";
 
+const updaterDisabled =
+  typeof __KUKU_UPDATER__ === "boolean"
+    ? __KUKU_UPDATER__
+    : import.meta.env.VITE_KUKU_UPDATER === "off";
+
+export const UPDATER_BUILD_MARKER = updaterDisabled
+  ? "kuku-updater-disabled"
+  : "kuku-updater-enabled";
+
+function isUpdaterEnabled(): boolean {
+  return !updaterDisabled;
+}
+
 // ── Types ──
 
 /**
@@ -82,6 +95,10 @@ function reset(): void {
  * Silent: surfaces only `available` (or `error`) — no toast, no dialog.
  */
 async function checkForUpdates(): Promise<void> {
+  if (!isUpdaterEnabled()) {
+    reset();
+    return;
+  }
   if (updaterState.status === "downloading" || updaterState.status === "ready") return;
   setStatus("checking");
   try {
@@ -102,6 +119,10 @@ async function checkForUpdates(): Promise<void> {
  * Safe only when `status === "available"`.
  */
 async function downloadAndInstall(): Promise<void> {
+  if (!isUpdaterEnabled()) {
+    reset();
+    return;
+  }
   const update = pendingUpdate;
   if (!update) {
     setError("No update available");
@@ -179,4 +200,13 @@ if (import.meta.env.DEV) {
 
 // ── Exports ──
 
-export { checkForUpdates, downloadAndInstall, reset, restart, setError, simulate, updaterState };
+export {
+  checkForUpdates,
+  downloadAndInstall,
+  isUpdaterEnabled,
+  reset,
+  restart,
+  setError,
+  simulate,
+  updaterState,
+};

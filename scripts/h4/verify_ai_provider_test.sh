@@ -126,7 +126,6 @@ if mode == "skip_line":
     print("skipped: KUKU_TEST_OPENAI_BASE_URL unset")
 if mode != "missing_live_requests":
     print(f"LIVE_REQUESTS attempt={attempt} test={name} chat={chat} models={models}")
-print(f"LIVE_REQUESTS test={name} chat={chat} models={models}")
 raise SystemExit(0)
 '''
 

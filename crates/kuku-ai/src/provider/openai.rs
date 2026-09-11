@@ -1475,6 +1475,76 @@ mod tests {
             count_requests(&fs::read_to_string(&ceiling_log).unwrap(), None),
             (6, 4)
         );
+
+        let dropped_stream_log = temp.join("dropped-stream.log");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind dropped-stream listener");
+        let address = listener.local_addr().expect("dropped-stream address");
+        let (request_sender, request_receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept dropped-stream request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set dropped-stream read timeout");
+            request_sender
+                .send(read_request(&mut stream))
+                .expect("record dropped-stream request");
+            let prefix = b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                prefix.len() + 128
+            )
+            .expect("write dropped-stream headers");
+            stream
+                .write_all(prefix)
+                .expect("write dropped-stream prefix");
+            stream.flush().expect("flush dropped-stream prefix");
+        });
+        let client = CountedHttpClient::with_context(
+            dropped_stream_log.clone(),
+            "dropped-stream".to_string(),
+            "dropped_stream".to_string(),
+        );
+        let events = runtime().block_on(async {
+            let backend = OpenAiBackend::with_http_client(
+                None,
+                &format!("http://{address}"),
+                "model",
+                client,
+            )
+            .expect("build dropped-stream backend");
+            backend
+                .stream_turn(turn_request(
+                    vec![user_message("hello")],
+                    Vec::new(),
+                    ToolChoice::Auto,
+                ))
+                .await
+                .expect("start dropped SSE stream")
+                .collect::<Vec<_>>()
+                .await
+        });
+        let request = request_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("record dropped-stream request");
+        assert_eq!(request.request_line, "POST /v1/chat/completions HTTP/1.1");
+        assert_eq!(
+            events.iter().filter(|event| event.is_err()).count(),
+            1,
+            "the backend must surface the dropped body as one terminal stream error"
+        );
+        assert!(matches!(
+            events.iter().find(|event| event.is_err()),
+            Some(Err(AiError::ProviderError(_)))
+        ));
+        assert_eq!(
+            count_requests(
+                &fs::read_to_string(&dropped_stream_log).expect("read dropped-stream log"),
+                None
+            ),
+            (1, 0),
+            "the concrete OpenAI adapter must not make a second send_streaming call"
+        );
     }
 
     fn live_settings() -> Option<(String, Option<String>, String)> {
@@ -1494,10 +1564,6 @@ mod tests {
         println!(
             "LIVE_REQUESTS attempt={} test={} chat={} models={}",
             client.attempt, name, observed.0, observed.1
-        );
-        println!(
-            "LIVE_REQUESTS test={} chat={} models={}",
-            name, observed.0, observed.1
         );
     }
 

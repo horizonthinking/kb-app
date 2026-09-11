@@ -174,11 +174,8 @@ for name in "${live_order[@]}"; do
     *) fail "internal error: unknown live test ${name}" ;;
   esac
   machine_line="LIVE_REQUESTS attempt=${attempt} test=${name} chat=${expected_chat} models=${expected_models}"
-  legacy_line="LIVE_REQUESTS test=${name} chat=${expected_chat} models=${expected_models}"
   machine_count=$(printf '%s\n' "$test_output" | awk -v wanted="$machine_line" '$0 == wanted { count += 1 } END { print count + 0 }')
-  legacy_count=$(printf '%s\n' "$test_output" | awk -v wanted="$legacy_line" '$0 == wanted { count += 1 } END { print count + 0 }')
   [[ $machine_count -eq 1 ]] || fail "${name} must print its attempt-scoped LIVE_REQUESTS line exactly once"
-  [[ $legacy_count -eq 1 ]] || fail "${name} must print its LIVE_REQUESTS line exactly once"
   read -r attempt_chat attempt_models <<<"$(attempt_counts "$attempt")"
   [[ $attempt_chat -eq $expected_chat && $attempt_models -eq $expected_models ]] ||
     fail "${name} attempt ${attempt} request delta was chat=${attempt_chat} models=${attempt_models}; expected chat=${expected_chat} models=${expected_models}"

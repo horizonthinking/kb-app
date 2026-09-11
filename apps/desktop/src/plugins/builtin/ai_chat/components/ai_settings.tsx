@@ -1,7 +1,19 @@
 import { For, Show, createEffect, createMemo, createSignal, on, type JSX } from "solid-js";
 
-import { chatState, loadConfig, loadTools, saveConfig } from "../chat_store";
+import {
+  chatState,
+  isSettingsDraftUnsaved,
+  loadConfig,
+  loadModelSuggestions,
+  loadTools,
+  saveSettingsDraft,
+  setSettingsDraft,
+} from "../chat_store";
+import { AI_PROVIDERS, assertNever, keyRequirementFor, normalizeApiKey } from "../config";
 import { formatToolIdentity, getToolInfo } from "../tool_identity";
+import type { AiProvider } from "../types";
+import { shortModelLabel } from "./model_label";
+import { guideCopyFor } from "./settings_copy";
 import { ChevronIcon, EyeIcon, EyeOffIcon } from "~/components/icons";
 import ScrollArea from "~/components/scroll_area";
 import {
@@ -19,58 +31,75 @@ import { t, tf } from "~/i18n";
 import { openSettings } from "~/stores/files";
 
 function openAccountSettings(): void {
-  openSettings({
-    kind: "plugin",
-    fillId: "core-auth.settings",
-    anchor: "session",
-  });
+  openSettings({ kind: "plugin", fillId: "core-auth.settings", anchor: "session" });
 }
 
-function shortModelLabel(modelId: string): string {
-  if (!modelId) return "—";
-  if (modelId.includes("gemini-3.1-flash-lite")) return "Gemini 3.1 Flash Lite";
-  if (modelId.includes("gemini-3.1-flash")) return "Gemini 3.1 Flash";
-  if (modelId.includes("flash")) return "Gemini Flash";
-  if (modelId.includes("pro")) return "Gemini Pro";
-  return modelId;
+function providerOptionLabel(provider: AiProvider): string {
+  switch (provider) {
+    case "remote":
+      return t("settings.plugin.ai_chat.connection.option_remote");
+    case "gemini":
+      return t("settings.plugin.ai_chat.connection.option_gemini");
+    case "openai":
+      return t("settings.plugin.ai_chat.connection.option_openai");
+    default:
+      return assertNever(provider);
+  }
+}
+
+function ApiKeyInput(props: {
+  value: string;
+  visible: boolean;
+  setVisible: (visible: boolean) => void;
+  onInput: (value: string) => void;
+}): JSX.Element {
+  return (
+    <div class="relative w-full">
+      <SettingsInput
+        type={props.visible ? "text" : "password"}
+        value={props.value}
+        placeholder={t("settings.plugin.ai_chat.api_key.placeholder")}
+        class="pr-9"
+        autocomplete="off"
+        spellcheck={false}
+        onInput={(event) => props.onInput(event.currentTarget.value)}
+      />
+      <button
+        type="button"
+        class="absolute inset-y-0 right-0 flex items-center px-2.5 text-text-muted transition-colors hover:text-text-primary"
+        onClick={() => props.setVisible(!props.visible)}
+        tabIndex={-1}
+        title={
+          props.visible
+            ? t("settings.plugin.ai_chat.api_key.hide")
+            : t("settings.plugin.ai_chat.api_key.show")
+        }
+      >
+        <Show when={props.visible} fallback={<EyeIcon size={14} />}>
+          <EyeOffIcon size={14} />
+        </Show>
+      </button>
+    </div>
+  );
 }
 
 function AiSettings(): JSX.Element {
-  const [apiKey, setApiKey] = createSignal("");
-  const [provider, setProvider] = createSignal<"gemini" | "remote">("gemini");
-  const [model, setModel] = createSignal("");
-  const [serverUrl, setServerUrl] = createSignal("");
-  const [showApiKey, setShowApiKey] = createSignal(false);
+  const [showGeminiApiKey, setShowGeminiApiKey] = createSignal(false);
+  const [showOpenAiApiKey, setShowOpenAiApiKey] = createSignal(false);
   const settingsRefreshToken = useSettingsRefreshToken();
 
   createEffect(
-    on(
-      settingsRefreshToken,
-      () => {
-        void Promise.all([loadConfig(), loadTools()]);
-      },
-      { defer: false },
-    ),
+    on(settingsRefreshToken, () => void Promise.all([loadConfig(), loadTools()]), { defer: false }),
   );
 
-  createEffect(() => {
-    if (!chatState.config.loading && !chatState.config.saving) {
-      setApiKey(chatState.config.apiKey);
-      setProvider(chatState.config.provider);
-      setModel(chatState.config.model);
-      setServerUrl(chatState.config.serverUrl);
-    }
-  });
-
-  const isUnsaved = createMemo(() => {
-    if (chatState.config.loading) return false;
-    return (
-      provider() !== chatState.config.provider ||
-      apiKey() !== chatState.config.apiKey ||
-      serverUrl() !== chatState.config.serverUrl
-    );
-  });
-
+  const isUnsaved = createMemo(isSettingsDraftUnsaved);
+  const guideCopy = createMemo(() => guideCopyFor(chatState.config.settingsDraft.provider));
+  const openAiKeyRequirement = createMemo(() =>
+    keyRequirementFor(chatState.config.settingsDraft.openaiBaseUrl),
+  );
+  const providerOptions = createMemo(() =>
+    AI_PROVIDERS.map((provider) => ({ value: provider, label: providerOptionLabel(provider) })),
+  );
   const saveButtonLabel = createMemo(() => {
     if (chatState.config.saving) return t("settings.plugin.ai_chat.action.saving");
     if (isUnsaved()) return t("settings.plugin.ai_chat.action.save_required");
@@ -86,7 +115,7 @@ function AiSettings(): JSX.Element {
           variant="primary"
           disabled={chatState.config.saving}
           class={isUnsaved() ? "ring-2 ring-warning/60 ring-offset-1 ring-offset-bg-primary" : ""}
-          onClick={() => void saveConfig(provider(), apiKey(), serverUrl())}
+          onClick={() => void saveSettingsDraft()}
         >
           {saveButtonLabel()}
         </SettingsToolbarAction>
@@ -99,38 +128,30 @@ function AiSettings(): JSX.Element {
           description={t("settings.plugin.ai_chat.unsaved.description")}
         />
       </Show>
+
       <SettingsBanner
         tone="info"
         class="select-text"
         title={t("settings.plugin.ai_chat.guide.title")}
         description={
-          <ol class="mt-1.5 list-decimal space-y-1.5 pl-4 text-xs/relaxed text-text-secondary [&_a]:text-text-primary [&_a]:underline [&_a]:underline-offset-2">
+          <ol class="mt-1.5 list-decimal space-y-1.5 pl-4 text-xs/relaxed text-text-secondary">
             <li>
               <strong class="text-text-primary">
                 {t("settings.plugin.ai_chat.guide.connection_label")}
               </strong>{" "}
-              {t("settings.plugin.ai_chat.guide.connection_before_link")}{" "}
-              <a
-                href="https://aistudio.google.com/apikey"
-                target="_blank"
-                rel="noreferrer"
-                class="whitespace-nowrap"
-              >
-                AI Studio
-              </a>{" "}
-              {t("settings.plugin.ai_chat.guide.connection_after_link")}
+              {t(guideCopy().connection)}
             </li>
             <li>
               <strong class="text-text-primary">
                 {t("settings.plugin.ai_chat.guide.save_label")}
               </strong>{" "}
-              {t("settings.plugin.ai_chat.guide.save_text")}
+              {t(guideCopy().save)}
             </li>
             <li>
               <strong class="text-text-primary">
                 {t("settings.plugin.ai_chat.guide.open_chat_label")}
               </strong>{" "}
-              {t("settings.plugin.ai_chat.guide.open_chat_text")}
+              {t(guideCopy().openChat)}
             </li>
           </ol>
         }
@@ -154,18 +175,15 @@ function AiSettings(): JSX.Element {
         control={
           <div class="w-full max-w-72">
             <SettingsSelect
-              options={[
-                { value: "remote", label: t("settings.plugin.ai_chat.connection.option_remote") },
-                { value: "gemini", label: t("settings.plugin.ai_chat.connection.option_gemini") },
-              ]}
-              value={provider()}
-              onChange={(value) => setProvider(value as "gemini" | "remote")}
+              options={providerOptions()}
+              value={chatState.config.settingsDraft.provider}
+              onChange={(value) => setSettingsDraft({ provider: value as AiProvider })}
             />
           </div>
         }
       />
 
-      <Show when={provider() === "remote"}>
+      <Show when={chatState.config.settingsDraft.provider === "remote"}>
         <SettingsFieldRow
           label={t("settings.plugin.ai_chat.model.label")}
           description={t("settings.plugin.ai_chat.model.remote_description")}
@@ -173,7 +191,7 @@ function AiSettings(): JSX.Element {
             <div class="w-full max-w-sm">
               <SettingsInput
                 type="text"
-                value={shortModelLabel(model())}
+                value={shortModelLabel(chatState.config.model)}
                 readOnly
                 class="text-text-secondary"
               />
@@ -188,7 +206,7 @@ function AiSettings(): JSX.Element {
         />
       </Show>
 
-      <Show when={provider() === "gemini"}>
+      <Show when={chatState.config.settingsDraft.provider === "gemini"}>
         <SettingsBanner
           tone="info"
           class="py-2.5! select-text"
@@ -201,50 +219,21 @@ function AiSettings(): JSX.Element {
             </ol>
           }
         />
-
         <SettingsFieldRow
           stacked
-          label={t("settings.plugin.ai_chat.api_key.label")}
+          label={t("settings.plugin.ai_chat.api_key.label_gemini")}
           description={t("settings.plugin.ai_chat.api_key.description")}
           control={
-            <div data-settings-anchor="api-key" class="w-full max-w-md space-y-1.5">
-              <div class="relative w-full">
-                <SettingsInput
-                  type={showApiKey() ? "text" : "password"}
-                  value={apiKey()}
-                  placeholder={t("settings.plugin.ai_chat.api_key.placeholder")}
-                  class="pr-9"
-                  autocomplete="off"
-                  spellcheck={false}
-                  onInput={(event) => setApiKey(event.currentTarget.value)}
-                />
-                <button
-                  type="button"
-                  class="absolute inset-y-0 right-0 flex items-center px-2.5 text-text-muted transition-colors hover:text-text-primary"
-                  onClick={() => setShowApiKey((prev) => !prev)}
-                  tabIndex={-1}
-                  title={
-                    showApiKey()
-                      ? t("settings.plugin.ai_chat.api_key.hide")
-                      : t("settings.plugin.ai_chat.api_key.show")
-                  }
-                >
-                  <Show when={showApiKey()} fallback={<EyeIcon size={14} />}>
-                    <EyeOffIcon size={14} />
-                  </Show>
-                </button>
-              </div>
-              <Show when={isUnsaved() && apiKey().trim() !== ""}>
-                <p class="text-[0.6875rem] font-medium text-warning" role="status">
-                  {t("settings.plugin.ai_chat.unsaved.inline_prefix")}{" "}
-                  <span class="text-text-primary">{t("settings.plugin.ai_chat.action.save")}</span>{" "}
-                  {t("settings.plugin.ai_chat.unsaved.inline_suffix")}
-                </p>
-              </Show>
+            <div data-settings-anchor="api-key" class="w-full max-w-md">
+              <ApiKeyInput
+                value={chatState.config.settingsDraft.apiKey}
+                visible={showGeminiApiKey()}
+                setVisible={setShowGeminiApiKey}
+                onInput={(apiKey) => setSettingsDraft({ apiKey })}
+              />
             </div>
           }
         />
-
         <SettingsFieldRow
           label={t("settings.plugin.ai_chat.model.label")}
           description={t("settings.plugin.ai_chat.model.gemini_description")}
@@ -252,13 +241,103 @@ function AiSettings(): JSX.Element {
             <div class="w-full max-w-sm">
               <SettingsInput
                 type="text"
-                value={shortModelLabel(model())}
+                value={shortModelLabel(chatState.config.model)}
                 readOnly
                 class="text-text-secondary"
               />
             </div>
           }
         />
+      </Show>
+
+      <Show when={chatState.config.settingsDraft.provider === "openai"}>
+        <SettingsFieldRow
+          stacked
+          label={t("settings.plugin.ai_chat.openai_base_url.label")}
+          description={t("settings.plugin.ai_chat.openai_base_url.description")}
+          control={
+            <div class="w-full max-w-md">
+              <SettingsInput
+                type="url"
+                value={chatState.config.settingsDraft.openaiBaseUrl}
+                placeholder={t("settings.plugin.ai_chat.openai_base_url.placeholder")}
+                spellcheck={false}
+                onInput={(event) => setSettingsDraft({ openaiBaseUrl: event.currentTarget.value })}
+              />
+            </div>
+          }
+        />
+        <SettingsFieldRow
+          stacked
+          label={`${t("settings.plugin.ai_chat.api_key.label_openai")} (${t(
+            openAiKeyRequirement() === "required"
+              ? "settings.plugin.ai_chat.api_key.requirement_required"
+              : "settings.plugin.ai_chat.api_key.requirement_optional",
+          )})`}
+          description={t("settings.plugin.ai_chat.api_key.description")}
+          control={
+            <div data-settings-anchor="api-key" class="w-full max-w-md">
+              <ApiKeyInput
+                value={chatState.config.settingsDraft.openaiApiKey}
+                visible={showOpenAiApiKey()}
+                setVisible={setShowOpenAiApiKey}
+                onInput={(openaiApiKey) => setSettingsDraft({ openaiApiKey })}
+              />
+            </div>
+          }
+        />
+        <Show
+          when={
+            openAiKeyRequirement() === "required" &&
+            normalizeApiKey(chatState.config.settingsDraft.openaiApiKey) === null
+          }
+        >
+          <SettingsBanner
+            tone="warning"
+            title={t("settings.plugin.ai_chat.openai_banner.key_title")}
+            description={t("settings.plugin.ai_chat.openai_banner.key_description")}
+          />
+        </Show>
+        <SettingsFieldRow
+          stacked
+          label={t("settings.plugin.ai_chat.model.label")}
+          description={t("settings.plugin.ai_chat.model.openai_description")}
+          control={
+            <div class="flex w-full max-w-md items-center gap-2">
+              <SettingsInput
+                type="text"
+                list="kuku-openai-models"
+                value={chatState.config.settingsDraft.openaiModel}
+                placeholder={t("settings.plugin.ai_chat.model.openai_placeholder")}
+                spellcheck={false}
+                onInput={(event) => setSettingsDraft({ openaiModel: event.currentTarget.value })}
+              />
+              <datalist id="kuku-openai-models">
+                <For each={chatState.config.modelSuggestions}>
+                  {(model) => <option value={model} />}
+                </For>
+              </datalist>
+              <SettingsToolbarAction
+                disabled={chatState.config.modelsLoading}
+                onClick={() => void loadModelSuggestions()}
+              >
+                {chatState.config.modelsLoading
+                  ? t("settings.plugin.ai_chat.models.loading")
+                  : t("settings.plugin.ai_chat.models.load")}
+              </SettingsToolbarAction>
+            </div>
+          }
+        />
+        <Show when={chatState.config.settingsDraft.openaiModel.trim().length === 0}>
+          <SettingsBanner
+            tone="warning"
+            title={t("settings.plugin.ai_chat.openai_banner.model_title")}
+            description={t("settings.plugin.ai_chat.openai_banner.model_description")}
+          />
+        </Show>
+        <Show when={chatState.config.modelsError}>
+          {(error) => <SettingsBanner tone="error" description={error()} />}
+        </Show>
       </Show>
 
       <Show when={chatState.config.error}>
@@ -314,7 +393,6 @@ function AiSettings(): JSX.Element {
                       const identity = () => formatToolIdentity(tool.toolId, tool.name);
                       const info = () => getToolInfo(tool.toolId ?? tool.name);
                       const showIdentity = () => identity() !== info().label;
-
                       return (
                         <SettingsListRow
                           title={<span class="text-[0.75rem]">{info().label}</span>}

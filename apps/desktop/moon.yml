@@ -47,6 +47,7 @@ tasks:
       - "src/**/*"
       - "vite.config.*"
       - "tsconfig.json"
+      - "/crates/kuku-ai/fixtures/**/*.json"
 
   build:
     # tsc emits types to verify, then vite builds the web bundle. Tauri's
@@ -59,6 +60,7 @@ tasks:
       - "index.html"
       - "vite.config.*"
       - "tsconfig.json"
+      - "$VITE_KUKU_UPDATER"
     outputs:
       - "dist"
 
@@ -106,6 +108,17 @@ tasks:
     env:
       VITE_KUKU_API_URL: "https://api.kuku.mom"
       VITE_KUKU_WEB_URL: "https://www.kuku.mom"
+      KUKU_API_URL: "https://api.kuku.mom"
+    options:
+      cache: false
+
+  tauri-build-h4:
+    command: "tauri build --config src-tauri/tauri.h4.conf.json"
+    env:
+      VITE_KUKU_API_URL: "https://api.kuku.mom"
+      VITE_KUKU_WEB_URL: "https://www.kuku.mom"
+      VITE_KUKU_UPDATER: "off"
+      VITE_KUKU_BUILD_LABEL: "h4.1"
       KUKU_API_URL: "https://api.kuku.mom"
     options:
       cache: false

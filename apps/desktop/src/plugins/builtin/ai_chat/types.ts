@@ -1,15 +1,30 @@
+import type { AI_PROVIDERS } from "./config";
+
 type ChatMode = "ask" | "agent" | "inline";
 type FinishReason = string;
 type ChatSessionStatus = "idle" | "streaming" | "awaiting-approval" | "applying" | "error";
+type AiProvider = (typeof AI_PROVIDERS)[number];
 
 interface AiConfig {
   apiKey: string | null;
+  openaiApiKey: string | null;
+  openaiBaseUrl?: string | null;
+  openaiModel?: string | null;
   model: string;
-  provider?: "gemini" | "remote";
+  provider?: AiProvider;
   serverUrl?: string | null;
   // Internal guardrails; not exposed in settings UI.
   roundLimit?: number;
   proxyToolTimeoutMs?: number;
+}
+
+interface AiSettingsDraft {
+  provider: AiProvider;
+  apiKey: string;
+  openaiApiKey: string;
+  openaiBaseUrl: string;
+  openaiModel: string;
+  serverUrl: string;
 }
 
 interface ChatFileAttachmentDraft {
@@ -163,9 +178,16 @@ interface ChatSessionState {
 
 interface ChatConfigState {
   apiKey: string;
-  provider: "gemini" | "remote";
+  openaiApiKey: string;
+  openaiBaseUrl: string;
+  openaiModel: string;
+  provider: AiProvider;
   serverUrl: string;
   model: string;
+  settingsDraft: AiSettingsDraft;
+  modelSuggestions: string[];
+  modelsLoading: boolean;
+  modelsError: string | null;
   rawConfig: Record<string, unknown>;
   loading: boolean;
   saving: boolean;
@@ -194,6 +216,8 @@ interface ChatSnapshotSource {
 
 export type {
   AiConfig,
+  AiProvider,
+  AiSettingsDraft,
   ChatApprovalMessage,
   ChatConfigState,
   ChatFileAttachmentDraft,
