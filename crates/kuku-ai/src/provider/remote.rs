@@ -39,6 +39,8 @@ impl CompletionBackend for RemoteBackend {
         &self,
         request: CompletionTurnRequest,
     ) -> Result<CompletionTurnStream, AiError> {
+        // The remote service keeps its existing server-side tool-selection behavior.
+        let _ = request.tool_choice;
         let authorization_header = request
             .authorization_header
             .clone()
@@ -92,10 +94,6 @@ impl CompletionBackend for RemoteBackend {
         };
 
         Ok(Box::pin(stream))
-    }
-
-    async fn list_models(&self) -> Result<Vec<String>, AiError> {
-        Ok(vec![self.model.clone()])
     }
 }
 

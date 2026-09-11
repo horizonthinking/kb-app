@@ -10,7 +10,16 @@ use crate::{
 };
 
 pub mod gemini;
+pub mod openai;
 pub mod remote;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolChoice {
+    #[default]
+    Auto,
+    Required,
+    None,
+}
 
 #[derive(Debug, Clone)]
 pub struct CompletionTurnRequest {
@@ -18,6 +27,7 @@ pub struct CompletionTurnRequest {
     pub system_prompt: Option<String>,
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolDescriptor>,
+    pub tool_choice: ToolChoice,
     pub authorization_header: Option<String>,
 }
 
@@ -40,7 +50,4 @@ pub trait CompletionBackend: Send + Sync {
         &self,
         request: CompletionTurnRequest,
     ) -> Result<CompletionTurnStream, AiError>;
-
-    #[allow(dead_code)]
-    async fn list_models(&self) -> Result<Vec<String>, AiError>;
 }

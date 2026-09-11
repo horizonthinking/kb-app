@@ -10,9 +10,9 @@ use uuid::Uuid;
 
 use crate::{
     AiError,
-    mutation::{MutationApplyResult, MutationOp},
+    mutation::{MutationApplyResult, MutationOp, MutationPlan},
     prompts::build_system_prompt,
-    provider::{CompletionEvent, CompletionTurnRequest},
+    provider::{CompletionEvent, CompletionTurnRequest, ToolChoice},
     state::AiState,
     tools::{ToolAccess, ToolCallContext, ToolDescriptor, ToolSource, allowed_tools},
     types::{
@@ -49,6 +49,51 @@ const HISTORY_SUMMARY_MAX_ATTACHMENTS: usize = 3;
 const HISTORY_SUMMARY_CONTEXT_MESSAGE: &str = "[Internal context: Earlier conversation turns were compacted to stay within the context budget. The next assistant message is a background summary of omitted history. Treat it as prior conversation context, not as a new user request.]";
 const HISTORY_SUMMARY_ASSISTANT_PREFIX: &str = "Background summary of earlier conversation:\n";
 const USER_MESSAGE_MARKER: &str = "--- USER MESSAGE ---\n";
+
+pub(crate) trait TurnEventSink: Send + Sync {
+    fn stream_chunk(&self, session_id: &str, delta: String);
+    fn done(
+        &self,
+        session_id: &str,
+        finish_reason: FinishReason,
+        usage: Option<crate::types::TokenUsage>,
+    );
+    fn error(&self, session_id: &str, error: &AiError);
+    fn tool_start(&self, session_id: &str, tool_call: &ModelToolCall, tool_id: &str);
+    fn tool_end(
+        &self,
+        session_id: &str,
+        tool_call: &ModelToolCall,
+        tool_id: &str,
+        output: &str,
+        is_error: bool,
+    );
+    fn pending_approval(
+        &self,
+        session_id: &str,
+        call_id: &str,
+        tool_id: &str,
+        tool_name: &str,
+        mutation: MutationPlan,
+        preview_text: Option<String>,
+    );
+    fn proxy_call(
+        &self,
+        session_id: &str,
+        call_id: &str,
+        tool_id: &str,
+        tool_name: &str,
+        arguments: Value,
+    );
+}
+
+pub(crate) struct PendingApproval {
+    pub(crate) call_id: String,
+    pub(crate) tool_id: String,
+    pub(crate) tool_name: String,
+    pub(crate) plan: MutationPlan,
+    pub(crate) preview_text: Option<String>,
+}
 
 struct CompactedHistory {
     messages: Vec<ChatMessage>,
@@ -161,6 +206,10 @@ impl SessionRuntime {
         self.control.lock().status = status;
     }
 
+    pub fn status(&self) -> SessionStatus {
+        self.control.lock().status
+    }
+
     pub fn remember_path_snapshot(&self, path: String, checksum: String, is_dir: bool) {
         self.path_snapshots
             .lock()
@@ -248,31 +297,49 @@ pub async fn run_turn(
     content: String,
     editor_context: EditorContext,
 ) {
-    let result = run_turn_inner(&app, &state, session.clone(), mode, content, editor_context).await;
+    let result = run_turn_inner(
+        Some(&app),
+        &app,
+        &state,
+        session.clone(),
+        mode,
+        content,
+        editor_context,
+    )
+    .await;
+    finalize_run(&session, &app, result);
+}
 
+pub(crate) fn finalize_run(
+    session: &SessionRuntime,
+    sink: &dyn TurnEventSink,
+    result: Result<(FinishReason, Option<crate::types::TokenUsage>), AiError>,
+) {
+    let deferred_cancel = session.complete_run();
     match result {
         Ok((finish_reason, usage)) => {
-            let finish_reason = if session.complete_run() {
+            let finish_reason = if deferred_cancel {
                 FinishReason::Cancelled
             } else {
                 finish_reason
             };
-            emit_done(&app, &session.id, finish_reason, usage);
+            sink.done(&session.id, finish_reason, usage);
         }
         Err(error) => {
-            let finish_reason = if matches!(error, AiError::Cancelled) || session.complete_run() {
+            let finish_reason = if matches!(error, AiError::Cancelled) || deferred_cancel {
                 FinishReason::Cancelled
             } else {
                 FinishReason::Error
             };
-            emit_error(&app, &session.id, &error);
-            emit_done(&app, &session.id, finish_reason, None);
+            sink.error(&session.id, &error);
+            sink.done(&session.id, finish_reason, None);
         }
     }
 }
 
-async fn run_turn_inner(
-    app: &AppHandle<Wry>,
+pub(crate) async fn run_turn_inner(
+    app: Option<&AppHandle<Wry>>,
+    sink: &dyn TurnEventSink,
     state: &AiState,
     session: Arc<SessionRuntime>,
     mode: ChatMode,
@@ -320,6 +387,7 @@ async fn run_turn_inner(
             system_prompt: Some(system_prompt),
             messages: compacted.messages,
             tools: allowed.clone(),
+            tool_choice: ToolChoice::Auto,
             authorization_header,
         };
 
@@ -362,7 +430,7 @@ async fn run_turn_inner(
                     match item? {
                         CompletionEvent::TextDelta(delta) => {
                             assistant_text.push_str(&delta);
-                            emit_stream_chunk(app, &session.id, delta);
+                            sink.stream_chunk(&session.id, delta);
                         }
                         CompletionEvent::ToolCalls(calls) => {
                             tool_calls.extend(calls);
@@ -391,7 +459,7 @@ async fn run_turn_inner(
 
         for tool_call in tool_calls {
             let result = handle_tool_call(
-                app, state, &session, &cancel, &run_mode, &allowed, &tool_call,
+                app, sink, state, &session, &cancel, &run_mode, &allowed, &tool_call,
             )
             .await?;
             session.messages.write().push(ChatMessage::ToolResult {
@@ -408,8 +476,10 @@ async fn run_turn_inner(
     Ok((FinishReason::ToolRoundLimit, final_usage))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_tool_call(
-    app: &AppHandle<Wry>,
+    app: Option<&AppHandle<Wry>>,
+    sink: &dyn TurnEventSink,
     state: &AiState,
     session: &Arc<SessionRuntime>,
     cancel: &CancellationToken,
@@ -426,14 +496,16 @@ async fn handle_tool_call(
         .map(|tool| tool.tool_id.clone())
         .unwrap_or_else(|| fallback_tool_id(&tool_call.tool_name));
 
-    emit_tool_start(app, &session.id, tool_call, &tool_id);
+    sink.tool_start(&session.id, tool_call, &tool_id);
 
     let outcome = match descriptor {
         None => (tool_not_allowed_message(&tool_call.tool_name, mode), true),
         Some(descriptor) => match descriptor.source {
             ToolSource::Native => {
-                match execute_native_tool(app, state, session, cancel, mode, tool_call, descriptor)
-                    .await
+                match execute_native_tool(
+                    app, sink, state, session, cancel, mode, tool_call, descriptor,
+                )
+                .await
                 {
                     Ok(outcome) => outcome,
                     Err(AiError::Cancelled) => return Err(AiError::Cancelled),
@@ -441,7 +513,7 @@ async fn handle_tool_call(
                 }
             }
             ToolSource::Proxy => {
-                match execute_proxy_tool(app, state, session, cancel, tool_call, &tool_id).await {
+                match execute_proxy_tool(sink, state, session, cancel, tool_call, &tool_id).await {
                     Ok(outcome) => outcome,
                     Err(AiError::Cancelled) => return Err(AiError::Cancelled),
                     Err(error) => (error.to_string(), true),
@@ -450,15 +522,7 @@ async fn handle_tool_call(
         },
     };
 
-    emit_tool_end(
-        app,
-        &session.id,
-        &tool_call.call_id,
-        &tool_id,
-        &tool_call.tool_name,
-        &outcome.0,
-        outcome.1,
-    );
+    sink.tool_end(&session.id, tool_call, &tool_id, &outcome.0, outcome.1);
     Ok(outcome)
 }
 
@@ -1008,8 +1072,10 @@ fn mode_label(mode: ChatMode) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_native_tool(
-    app: &AppHandle<Wry>,
+    app: Option<&AppHandle<Wry>>,
+    sink: &dyn TurnEventSink,
     state: &AiState,
     session: &Arc<SessionRuntime>,
     cancel: &CancellationToken,
@@ -1017,6 +1083,7 @@ async fn execute_native_tool(
     tool_call: &ModelToolCall,
     descriptor: ToolDescriptor,
 ) -> Result<(String, bool), AiError> {
+    let app = app.ok_or(AiError::HostUnavailable)?;
     let tool = state
         .tools()
         .get_native(&tool_call.tool_name)
@@ -1044,58 +1111,24 @@ async fn execute_native_tool(
     else {
         return Ok((native_result.text, false));
     };
-    let mutation_operations = mutation.operations.clone();
-    let approval_rx = session.begin_awaiting_approval(tool_call.call_id.clone())?;
-    emit_pending_approval(
-        app,
-        &session.id,
-        &tool_call.call_id,
-        &descriptor.tool_id,
-        &tool_call.tool_name,
-        mutation.clone(),
-        native_result.preview_text.clone(),
-    );
-
-    let decision = tokio::select! {
-        _ = cancel.cancelled() => {
-            session.clear_approval(&tool_call.call_id);
-            return Err(AiError::Cancelled);
-        }
-        decision = approval_rx => decision.map_err(|_| AiError::ApprovalNotFound)?,
-    };
-
-    if matches!(decision, ApprovalDecision::Reject) {
-        session.set_status(SessionStatus::Streaming);
-        return Ok(("Rejected by user".to_string(), true));
-    }
-
-    let host = state.host().ok_or(AiError::HostUnavailable)?;
-    session.set_status(SessionStatus::Applying);
-    let apply_result = host.apply_mutation(mutation).await?;
-    match &apply_result {
-        MutationApplyResult::Applied { .. } => {
-            session.apply_successful_mutation(&mutation_operations);
-        }
-        MutationApplyResult::PartiallyApplied { .. } => {
-            session.clear_mutation_snapshots(&mutation_operations);
-        }
-        MutationApplyResult::Conflict { .. } => {}
-    }
-    let output = describe_apply_result(&apply_result);
-    session.set_status(SessionStatus::Streaming);
-
-    if cancel.is_cancelled() {
-        return Err(AiError::Cancelled);
-    }
-
-    Ok((
-        output,
-        matches!(apply_result, MutationApplyResult::Conflict { .. }),
-    ))
+    gate_and_apply(
+        sink,
+        || state.host(),
+        session,
+        cancel,
+        PendingApproval {
+            call_id: tool_call.call_id.clone(),
+            tool_id: descriptor.tool_id,
+            tool_name: tool_call.tool_name.clone(),
+            plan: mutation,
+            preview_text: native_result.preview_text,
+        },
+    )
+    .await
 }
 
 async fn execute_proxy_tool(
-    app: &AppHandle<Wry>,
+    sink: &dyn TurnEventSink,
     state: &AiState,
     session: &Arc<SessionRuntime>,
     cancel: &CancellationToken,
@@ -1112,8 +1145,7 @@ async fn execute_proxy_tool(
     let receiver = state
         .proxy_broker()
         .register_pending(tool_call.call_id.clone());
-    emit_proxy_call(
-        app,
+    sink.proxy_call(
         &session.id,
         &tool_call.call_id,
         tool_id,
@@ -1139,6 +1171,60 @@ async fn execute_proxy_tool(
     };
 
     Ok((response.output, response.is_error))
+}
+
+pub(crate) async fn gate_and_apply(
+    sink: &dyn TurnEventSink,
+    host: impl FnOnce() -> Option<Arc<dyn crate::AiHostBindings>>,
+    session: &Arc<SessionRuntime>,
+    cancel: &CancellationToken,
+    pending: PendingApproval,
+) -> Result<(String, bool), AiError> {
+    let mutation_operations = pending.plan.operations.clone();
+    let approval_rx = session.begin_awaiting_approval(pending.call_id.clone())?;
+    sink.pending_approval(
+        &session.id,
+        &pending.call_id,
+        &pending.tool_id,
+        &pending.tool_name,
+        pending.plan.clone(),
+        pending.preview_text,
+    );
+
+    let decision = tokio::select! {
+        _ = cancel.cancelled() => {
+            session.clear_approval(&pending.call_id);
+            return Err(AiError::Cancelled);
+        }
+        decision = approval_rx => decision.map_err(|_| AiError::ApprovalNotFound)?,
+    };
+
+    if matches!(decision, ApprovalDecision::Reject) {
+        session.set_status(SessionStatus::Streaming);
+        return Ok(("Rejected by user".to_string(), true));
+    }
+
+    let host = host().ok_or(AiError::HostUnavailable)?;
+    session.set_status(SessionStatus::Applying);
+    let apply_result = host.apply_mutation(pending.plan).await?;
+    match &apply_result {
+        MutationApplyResult::Applied { .. } => {
+            session.apply_successful_mutation(&mutation_operations);
+        }
+        MutationApplyResult::PartiallyApplied { .. } => {
+            session.clear_mutation_snapshots(&mutation_operations);
+        }
+        MutationApplyResult::Conflict { .. } => {}
+    }
+    let output = describe_apply_result(&apply_result);
+    session.set_status(SessionStatus::Streaming);
+    if cancel.is_cancelled() {
+        return Err(AiError::Cancelled);
+    }
+    Ok((
+        output,
+        matches!(apply_result, MutationApplyResult::Conflict { .. }),
+    ))
 }
 
 fn describe_apply_result(result: &MutationApplyResult) -> String {
@@ -1180,6 +1266,79 @@ fn describe_apply_result(result: &MutationApplyResult) -> String {
                 .join(", ");
             format!("Conflict: {summary}. {detail}")
         }
+    }
+}
+
+impl TurnEventSink for AppHandle<Wry> {
+    fn stream_chunk(&self, session_id: &str, delta: String) {
+        emit_stream_chunk(self, session_id, delta);
+    }
+
+    fn done(
+        &self,
+        session_id: &str,
+        finish_reason: FinishReason,
+        usage: Option<crate::types::TokenUsage>,
+    ) {
+        emit_done(self, session_id, finish_reason, usage);
+    }
+
+    fn error(&self, session_id: &str, error: &AiError) {
+        emit_error(self, session_id, error);
+    }
+
+    fn tool_start(&self, session_id: &str, tool_call: &ModelToolCall, tool_id: &str) {
+        emit_tool_start(self, session_id, tool_call, tool_id);
+    }
+
+    fn tool_end(
+        &self,
+        session_id: &str,
+        tool_call: &ModelToolCall,
+        tool_id: &str,
+        output: &str,
+        is_error: bool,
+    ) {
+        emit_tool_end(
+            self,
+            session_id,
+            &tool_call.call_id,
+            tool_id,
+            &tool_call.tool_name,
+            output,
+            is_error,
+        );
+    }
+
+    fn pending_approval(
+        &self,
+        session_id: &str,
+        call_id: &str,
+        tool_id: &str,
+        tool_name: &str,
+        mutation: MutationPlan,
+        preview_text: Option<String>,
+    ) {
+        emit_pending_approval(
+            self,
+            session_id,
+            call_id,
+            tool_id,
+            tool_name,
+            mutation,
+            preview_text,
+        );
+    }
+
+    fn proxy_call(
+        &self,
+        session_id: &str,
+        call_id: &str,
+        tool_id: &str,
+        tool_name: &str,
+        arguments: Value,
+    ) {
+        emit_proxy_call(self, session_id, call_id, tool_id, tool_name, arguments);
     }
 }
 
@@ -1328,12 +1487,36 @@ fn empty_directory_checksum() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        SessionRuntime, SessionStatus, compact_history_for_model, content_with_mode_notice,
-        content_with_turn_context, remember_embedded_file_snapshots, summarize_output,
-        tool_not_allowed_message,
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
-    use crate::types::{ChatMessage, ChatMode, EditorContext, EmbeddedFileContext};
+
+    use async_trait::async_trait;
+    use parking_lot::Mutex;
+    use serde_json::{Value, json};
+    use tokio::{sync::Notify, time::timeout};
+
+    use super::{
+        ApprovalDecision, PendingApproval, SessionRuntime, SessionStatus, TurnEventSink,
+        compact_history_for_model, content_with_mode_notice, content_with_turn_context,
+        finalize_run, gate_and_apply, remember_embedded_file_snapshots, run_turn_inner,
+        summarize_output, tool_not_allowed_message,
+    };
+    use crate::{
+        AiConfig, AiError, AiHostBindings, AiState, ConflictItem, MutationApplyResult, MutationOp,
+        MutationPlan, ProxyToolDescriptor, ProxyToolResult,
+        provider::{
+            CompletionBackend, CompletionEvent, CompletionTurnRequest, CompletionTurnStream,
+        },
+        types::{
+            ChatMessage, ChatMode, EditorContext, EmbeddedFileContext, FinishReason, ModelToolCall,
+            ProviderKind, TokenUsage,
+        },
+    };
 
     #[test]
     fn summarize_output_keeps_short_strings() {
@@ -1656,5 +1839,708 @@ mod tests {
                     && content.contains("Background summary of earlier conversation")
                     && content.contains("carry this forward")
         ));
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum SinkEvent {
+        StreamChunk(String),
+        Done(FinishReason, Option<(u64, u64, u64, u64)>),
+        Error(String),
+        ToolStart(String),
+        ToolEnd(String, String, bool),
+        PendingApproval(String),
+        ProxyCall(String),
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Mutex<Vec<SinkEvent>>,
+        proxy_called: Notify,
+    }
+
+    impl RecordingSink {
+        fn events(&self) -> Vec<SinkEvent> {
+            self.events.lock().clone()
+        }
+    }
+
+    impl TurnEventSink for RecordingSink {
+        fn stream_chunk(&self, _session_id: &str, delta: String) {
+            self.events.lock().push(SinkEvent::StreamChunk(delta));
+        }
+
+        fn done(&self, _session_id: &str, finish_reason: FinishReason, usage: Option<TokenUsage>) {
+            self.events.lock().push(SinkEvent::Done(
+                finish_reason,
+                usage.map(|usage| {
+                    (
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.total_tokens,
+                        usage.cached_input_tokens,
+                    )
+                }),
+            ));
+        }
+
+        fn error(&self, _session_id: &str, error: &AiError) {
+            self.events.lock().push(SinkEvent::Error(error.to_string()));
+        }
+
+        fn tool_start(&self, _session_id: &str, tool_call: &ModelToolCall, _tool_id: &str) {
+            self.events
+                .lock()
+                .push(SinkEvent::ToolStart(tool_call.tool_name.clone()));
+        }
+
+        fn tool_end(
+            &self,
+            _session_id: &str,
+            tool_call: &ModelToolCall,
+            _tool_id: &str,
+            output: &str,
+            is_error: bool,
+        ) {
+            self.events.lock().push(SinkEvent::ToolEnd(
+                tool_call.tool_name.clone(),
+                output.to_string(),
+                is_error,
+            ));
+        }
+
+        fn pending_approval(
+            &self,
+            _session_id: &str,
+            call_id: &str,
+            _tool_id: &str,
+            _tool_name: &str,
+            _mutation: MutationPlan,
+            _preview_text: Option<String>,
+        ) {
+            self.events
+                .lock()
+                .push(SinkEvent::PendingApproval(call_id.to_string()));
+        }
+
+        fn proxy_call(
+            &self,
+            _session_id: &str,
+            call_id: &str,
+            _tool_id: &str,
+            _tool_name: &str,
+            _arguments: Value,
+        ) {
+            self.events
+                .lock()
+                .push(SinkEvent::ProxyCall(call_id.to_string()));
+            self.proxy_called.notify_one();
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeHost {
+        calls: Arc<AtomicUsize>,
+        result: Result<MutationApplyResult, AiError>,
+        cancel_during_apply: Option<Arc<SessionRuntime>>,
+    }
+
+    #[async_trait]
+    impl AiHostBindings for FakeHost {
+        async fn apply_mutation(
+            &self,
+            _plan: MutationPlan,
+        ) -> Result<MutationApplyResult, AiError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(session) = &self.cancel_during_apply {
+                session.cancel();
+            }
+            self.result.clone()
+        }
+    }
+
+    fn mutation_plan(content: &str) -> MutationPlan {
+        MutationPlan {
+            summary: "write note".to_string(),
+            operations: vec![MutationOp::CreateFile {
+                path: "notes/a.md".to_string(),
+                content: content.to_string(),
+            }],
+        }
+    }
+
+    fn pending(plan: MutationPlan) -> PendingApproval {
+        PendingApproval {
+            call_id: "call-1".to_string(),
+            tool_id: "builtin.edit_file".to_string(),
+            tool_name: "edit_file".to_string(),
+            plan,
+            preview_text: Some("preview".to_string()),
+        }
+    }
+
+    async fn wait_for_status(session: &SessionRuntime, expected: SessionStatus) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if session.status() == expected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("session reached expected status");
+    }
+
+    fn fake_host(
+        result: Result<MutationApplyResult, AiError>,
+    ) -> (Arc<AtomicUsize>, Arc<dyn AiHostBindings>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        (
+            calls.clone(),
+            Arc::new(FakeHost {
+                calls,
+                result,
+                cancel_during_apply: None,
+            }),
+        )
+    }
+
+    #[test]
+    fn gate_and_apply_preserves_approval_semantics_reject_without_host() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let sink = RecordingSink::default();
+                let session = Arc::new(SessionRuntime::new(ChatMode::Agent));
+                let cancel = session.start_run().expect("start run");
+                let resolver = session.clone();
+                tokio::spawn(async move {
+                    wait_for_status(&resolver, SessionStatus::AwaitingApproval).await;
+                    resolver
+                        .resolve_approval("call-1", false)
+                        .expect("reject approval");
+                });
+                let host_resolutions = AtomicUsize::new(0);
+                let outcome = gate_and_apply(
+                    &sink,
+                    || {
+                        host_resolutions.fetch_add(1, Ordering::SeqCst);
+                        None
+                    },
+                    &session,
+                    &cancel,
+                    pending(mutation_plan("new")),
+                )
+                .await
+                .expect("rejection is a tool output");
+                assert_eq!(outcome, ("Rejected by user".to_string(), true));
+                assert_eq!(host_resolutions.load(Ordering::SeqCst), 0);
+                assert_eq!(session.status(), SessionStatus::Streaming);
+                assert_eq!(
+                    sink.events(),
+                    vec![SinkEvent::PendingApproval("call-1".to_string())]
+                );
+            });
+    }
+
+    #[test]
+    fn gate_and_apply_preserves_approval_semantics_cancelled_while_waiting() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let sink = RecordingSink::default();
+                let session = Arc::new(SessionRuntime::new(ChatMode::Agent));
+                let cancel = session.start_run().expect("start run");
+                let canceller = session.clone();
+                tokio::spawn(async move {
+                    wait_for_status(&canceller, SessionStatus::AwaitingApproval).await;
+                    canceller.cancel();
+                });
+                let result = gate_and_apply(
+                    &sink,
+                    || None,
+                    &session,
+                    &cancel,
+                    pending(mutation_plan("new")),
+                )
+                .await;
+                assert!(matches!(result, Err(AiError::Cancelled)));
+                assert!(matches!(
+                    session.resolve_approval("call-1", true),
+                    Err(AiError::ApprovalNotFound)
+                ));
+            });
+    }
+
+    #[test]
+    fn gate_and_apply_preserves_approval_semantics_cancelled_during_apply() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let sink = RecordingSink::default();
+                let session = Arc::new(SessionRuntime::new(ChatMode::Agent));
+                session.remember_path_snapshot("notes/a.md".to_string(), "old".to_string(), false);
+                let cancel = session.start_run().expect("start run");
+                let resolver = session.clone();
+                tokio::spawn(async move {
+                    wait_for_status(&resolver, SessionStatus::AwaitingApproval).await;
+                    resolver
+                        .resolve_approval("call-1", true)
+                        .expect("approve mutation");
+                });
+                let calls = Arc::new(AtomicUsize::new(0));
+                let host: Arc<dyn AiHostBindings> = Arc::new(FakeHost {
+                    calls: calls.clone(),
+                    result: Ok(MutationApplyResult::Applied {
+                        summary: "saved".to_string(),
+                        warnings: Vec::new(),
+                    }),
+                    cancel_during_apply: Some(session.clone()),
+                });
+                let result = gate_and_apply(
+                    &sink,
+                    || Some(host),
+                    &session,
+                    &cancel,
+                    pending(mutation_plan("new")),
+                )
+                .await;
+                assert!(matches!(result, Err(AiError::Cancelled)));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert_eq!(
+                    session.path_snapshot("notes/a.md"),
+                    Some((blake3::hash(b"new").to_hex().to_string(), false))
+                );
+                assert_eq!(session.status(), SessionStatus::Streaming);
+            });
+    }
+
+    #[test]
+    fn gate_and_apply_preserves_approval_semantics_applied_updates_snapshots() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let sink = RecordingSink::default();
+                let session = Arc::new(SessionRuntime::new(ChatMode::Agent));
+                session.remember_path_snapshot("notes/a.md".to_string(), "old".to_string(), false);
+                let cancel = session.start_run().expect("start run");
+                let resolver = session.clone();
+                tokio::spawn(async move {
+                    wait_for_status(&resolver, SessionStatus::AwaitingApproval).await;
+                    resolver.resolve_approval("call-1", true).unwrap();
+                });
+                let (calls, host) = fake_host(Ok(MutationApplyResult::Applied {
+                    summary: "saved".to_string(),
+                    warnings: Vec::new(),
+                }));
+                let outcome = gate_and_apply(
+                    &sink,
+                    || Some(host),
+                    &session,
+                    &cancel,
+                    pending(mutation_plan("new")),
+                )
+                .await
+                .expect("apply mutation");
+                assert_eq!(outcome, ("Applied: saved".to_string(), false));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert_eq!(
+                    session.path_snapshot("notes/a.md"),
+                    Some((blake3::hash(b"new").to_hex().to_string(), false))
+                );
+                assert_eq!(session.status(), SessionStatus::Streaming);
+            });
+    }
+
+    #[test]
+    fn gate_and_apply_preserves_approval_semantics_partially_applied_clears_snapshots() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let sink = RecordingSink::default();
+                let session = Arc::new(SessionRuntime::new(ChatMode::Agent));
+                session.remember_path_snapshot("notes/a.md".to_string(), "old".to_string(), false);
+                let cancel = session.start_run().expect("start run");
+                let resolver = session.clone();
+                tokio::spawn(async move {
+                    wait_for_status(&resolver, SessionStatus::AwaitingApproval).await;
+                    resolver.resolve_approval("call-1", true).unwrap();
+                });
+                let (calls, host) = fake_host(Ok(MutationApplyResult::PartiallyApplied {
+                    summary: "partial".to_string(),
+                    applied: Vec::new(),
+                    failed: vec!["notes/a.md".to_string()],
+                    skipped: Vec::new(),
+                    warnings: Vec::new(),
+                }));
+                let outcome = gate_and_apply(
+                    &sink,
+                    || Some(host),
+                    &session,
+                    &cancel,
+                    pending(mutation_plan("new")),
+                )
+                .await
+                .expect("partial apply is reported");
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert_eq!(session.path_snapshot("notes/a.md"), None);
+                assert!(!outcome.1);
+            });
+    }
+
+    #[test]
+    fn gate_and_apply_preserves_approval_semantics_conflict_is_error_output() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let sink = RecordingSink::default();
+                let session = Arc::new(SessionRuntime::new(ChatMode::Agent));
+                let cancel = session.start_run().expect("start run");
+                let resolver = session.clone();
+                tokio::spawn(async move {
+                    wait_for_status(&resolver, SessionStatus::AwaitingApproval).await;
+                    resolver.resolve_approval("call-1", true).unwrap();
+                });
+                let (_calls, host) = fake_host(Ok(MutationApplyResult::Conflict {
+                    summary: "changed".to_string(),
+                    conflicts: vec![ConflictItem {
+                        path: "notes/a.md".to_string(),
+                        reason: "checksum mismatch".to_string(),
+                        expected: Some("old".to_string()),
+                        actual: Some("new".to_string()),
+                    }],
+                }));
+                let outcome = gate_and_apply(
+                    &sink,
+                    || Some(host),
+                    &session,
+                    &cancel,
+                    pending(mutation_plan("new")),
+                )
+                .await
+                .expect("conflict is a tool output");
+                assert_eq!(
+                    outcome,
+                    (
+                        "Conflict: changed. notes/a.md (checksum mismatch)".to_string(),
+                        true
+                    )
+                );
+            });
+    }
+
+    #[test]
+    fn gate_and_apply_preserves_approval_semantics_host_failure_propagates() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let sink = RecordingSink::default();
+                let session = Arc::new(SessionRuntime::new(ChatMode::Agent));
+                let cancel = session.start_run().expect("start run");
+                let resolver = session.clone();
+                tokio::spawn(async move {
+                    wait_for_status(&resolver, SessionStatus::AwaitingApproval).await;
+                    resolver.resolve_approval("call-1", true).unwrap();
+                });
+                let (_calls, host) = fake_host(Err(AiError::State("host failed".to_string())));
+                let result = gate_and_apply(
+                    &sink,
+                    || Some(host),
+                    &session,
+                    &cancel,
+                    pending(mutation_plan("new")),
+                )
+                .await;
+                assert!(matches!(
+                    result,
+                    Err(AiError::State(message)) if message == "host failed"
+                ));
+            });
+    }
+
+    #[test]
+    fn gate_and_apply_preserves_approval_semantics_sender_dropped_is_approval_not_found() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let sink = RecordingSink::default();
+                let session = Arc::new(SessionRuntime::new(ChatMode::Agent));
+                let cancel = session.start_run().expect("start run");
+                let clearer = session.clone();
+                tokio::spawn(async move {
+                    wait_for_status(&clearer, SessionStatus::AwaitingApproval).await;
+                    clearer.clear_approval("call-1");
+                });
+                let result = timeout(
+                    Duration::from_secs(2),
+                    gate_and_apply(
+                        &sink,
+                        || None,
+                        &session,
+                        &cancel,
+                        pending(mutation_plan("new")),
+                    ),
+                )
+                .await
+                .expect("sender-drop case must not hang");
+                assert!(matches!(result, Err(AiError::ApprovalNotFound)));
+            });
+    }
+
+    #[test]
+    fn resolve_approval_unknown_call_id_is_approval_not_found() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let session = SessionRuntime::new(ChatMode::Agent);
+                let receiver = session
+                    .begin_awaiting_approval("active".to_string())
+                    .expect("start active approval");
+                assert!(matches!(
+                    session.resolve_approval("unknown", true),
+                    Err(AiError::ApprovalNotFound)
+                ));
+                session
+                    .resolve_approval("active", true)
+                    .expect("active waiter remains");
+                assert!(matches!(
+                    receiver.await.expect("receive active decision"),
+                    ApprovalDecision::Approve
+                ));
+            });
+    }
+
+    #[test]
+    fn run_finalization_always_completes_the_run() {
+        let cancelled_sink = RecordingSink::default();
+        let cancelled_session = SessionRuntime::new(ChatMode::Agent);
+        cancelled_session.start_run().expect("start cancelled run");
+        cancelled_session.set_status(SessionStatus::Streaming);
+        finalize_run(&cancelled_session, &cancelled_sink, Err(AiError::Cancelled));
+        assert_eq!(cancelled_session.status(), SessionStatus::Idle);
+        assert_eq!(
+            cancelled_sink.events(),
+            vec![
+                SinkEvent::Error("AI request was cancelled.".to_string()),
+                SinkEvent::Done(FinishReason::Cancelled, None)
+            ]
+        );
+
+        let success_sink = RecordingSink::default();
+        let success_session = SessionRuntime::new(ChatMode::Agent);
+        success_session.start_run().expect("start successful run");
+        let usage = TokenUsage {
+            input_tokens: 3,
+            output_tokens: 2,
+            total_tokens: 5,
+            cached_input_tokens: 1,
+        };
+        finalize_run(
+            &success_session,
+            &success_sink,
+            Ok((FinishReason::Stop, Some(usage))),
+        );
+        assert_eq!(success_session.status(), SessionStatus::Idle);
+        assert_eq!(
+            success_sink.events(),
+            vec![SinkEvent::Done(FinishReason::Stop, Some((3, 2, 5, 1)))]
+        );
+    }
+
+    struct ScriptedBackend {
+        requests: Mutex<Vec<CompletionTurnRequest>>,
+        calls: AtomicUsize,
+    }
+
+    impl ScriptedBackend {
+        fn new() -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CompletionBackend for ScriptedBackend {
+        async fn stream_turn(
+            &self,
+            request: CompletionTurnRequest,
+        ) -> Result<CompletionTurnStream, AiError> {
+            self.requests.lock().push(request);
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let events = match call {
+                0 => vec![
+                    CompletionEvent::ToolCalls(vec![ModelToolCall {
+                        call_id: "internal-call".to_string(),
+                        tool_name: "list_files".to_string(),
+                        arguments: json!({ "path": "" }),
+                        signature: None,
+                        tool_call_id: Some("tool-call-id".to_string()),
+                        provider_call_id: Some("provider-call-id".to_string()),
+                    }]),
+                    CompletionEvent::Finished {
+                        finish_reason: FinishReason::ToolCalls,
+                        usage: None,
+                    },
+                ],
+                1 => vec![
+                    CompletionEvent::TextDelta("done".to_string()),
+                    CompletionEvent::Finished {
+                        finish_reason: FinishReason::Stop,
+                        usage: Some(TokenUsage {
+                            input_tokens: 4,
+                            output_tokens: 1,
+                            total_tokens: 5,
+                            cached_input_tokens: 0,
+                        }),
+                    },
+                ],
+                other => panic!("unexpected backend round {other}"),
+            };
+            Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+        }
+    }
+
+    #[test]
+    fn session_loop_dispatches_tool_result_and_runs_second_round() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let state = AiState::default();
+                state
+                    .set_config(AiConfig {
+                        provider: ProviderKind::OpenAi,
+                        api_key: None,
+                        openai_api_key: None,
+                        openai_base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+                        openai_model: Some("fake".to_string()),
+                        model: "fake".to_string(),
+                        server_url: None,
+                        round_limit: 3,
+                        proxy_tool_timeout_ms: 2_000,
+                    })
+                    .expect("set fake config");
+                let backend = Arc::new(ScriptedBackend::new());
+                state.set_backend_for_test(backend.clone());
+                state.register_proxy_tool(ProxyToolDescriptor {
+                    tool_id: "proxy.list_files".to_string(),
+                    name: "list_files".to_string(),
+                    description: "List files".to_string(),
+                    parameters: json!({ "type": "object" }),
+                    category: "test".to_string(),
+                });
+                let session = state.create_session(ChatMode::Agent);
+                let sink = Arc::new(RecordingSink::default());
+                let responder_sink = sink.clone();
+                let broker = state.proxy_broker().clone();
+                let responder = tokio::spawn(async move {
+                    timeout(
+                        Duration::from_secs(2),
+                        responder_sink.proxy_called.notified(),
+                    )
+                    .await
+                    .expect("proxy call emitted");
+                    broker
+                        .resolve(
+                            "internal-call",
+                            ProxyToolResult {
+                                output: r#"{"files":[]}"#.to_string(),
+                                is_error: false,
+                            },
+                        )
+                        .expect("resolve proxy call");
+                });
+                let result = run_turn_inner(
+                    None,
+                    sink.as_ref(),
+                    &state,
+                    session,
+                    ChatMode::Agent,
+                    "go".to_string(),
+                    EditorContext::default(),
+                )
+                .await
+                .expect("run scripted turn");
+                responder.await.expect("proxy responder");
+                assert_eq!(result.0, FinishReason::Stop);
+                let usage = result.1.expect("second-round usage");
+                assert_eq!(usage.input_tokens, 4);
+                assert_eq!(usage.output_tokens, 1);
+                assert_eq!(usage.total_tokens, 5);
+                assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+                let requests = backend.requests.lock();
+                assert_eq!(requests.len(), 2);
+                let tool_results = requests[1]
+                    .messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        ChatMessage::ToolResult {
+                            call_id,
+                            output,
+                            tool_call_id,
+                            provider_call_id,
+                            ..
+                        } => Some((call_id, output, tool_call_id, provider_call_id)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(tool_results.len(), 1);
+                assert_eq!(tool_results[0].0, "internal-call");
+                assert_eq!(tool_results[0].1, r#"{"files":[]}"#);
+                assert_eq!(tool_results[0].2.as_deref(), Some("tool-call-id"));
+                assert_eq!(tool_results[0].3.as_deref(), Some("provider-call-id"));
+                let events = sink.events();
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(event, SinkEvent::ToolStart(_)))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(event, SinkEvent::ProxyCall(_)))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(event, SinkEvent::ToolEnd(_, _, _)))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(
+                            |event| matches!(event, SinkEvent::StreamChunk(text) if text == "done")
+                        )
+                        .count(),
+                    1
+                );
+            });
     }
 }

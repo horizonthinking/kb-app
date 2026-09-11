@@ -7,6 +7,8 @@ use crate::mutation::MutationPlan;
 #[serde(rename_all = "camelCase")]
 pub enum ProviderKind {
     Gemini,
+    #[serde(rename = "openai")]
+    OpenAi,
     Remote,
 }
 
@@ -44,6 +46,12 @@ pub struct EditorContext {
 pub struct AiConfig {
     pub provider: ProviderKind,
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
+    #[serde(default)]
+    pub openai_base_url: Option<String>,
+    #[serde(default)]
+    pub openai_model: Option<String>,
     pub model: String,
     pub server_url: Option<String>,
     pub round_limit: u32,
@@ -55,11 +63,48 @@ impl Default for AiConfig {
         Self {
             provider: ProviderKind::Remote,
             api_key: None,
+            openai_api_key: None,
+            openai_base_url: None,
+            openai_model: None,
             model: "gemini-3.1-flash-lite".to_string(),
             server_url: Some(default_server_url()),
             round_limit: 12,
             proxy_tool_timeout_ms: 15_000,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AiConfig, ProviderKind};
+
+    #[test]
+    fn provider_kind_openai_serializes_as_openai() {
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::OpenAi).expect("serialize provider"),
+            "\"openai\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ProviderKind>("\"openai\"").expect("deserialize provider"),
+            ProviderKind::OpenAi
+        );
+    }
+
+    #[test]
+    fn ai_config_deserializes_without_openai_fields() {
+        let config: AiConfig = serde_json::from_value(serde_json::json!({
+            "provider": "gemini",
+            "apiKey": "legacy-key",
+            "model": "gemini-3.1-flash-lite",
+            "serverUrl": null,
+            "roundLimit": 12,
+            "proxyToolTimeoutMs": 15000
+        }))
+        .expect("legacy config should deserialize");
+
+        assert_eq!(config.openai_api_key, None);
+        assert_eq!(config.openai_base_url, None);
+        assert_eq!(config.openai_model, None);
     }
 }
 
