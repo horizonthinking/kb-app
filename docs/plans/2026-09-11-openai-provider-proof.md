@@ -134,6 +134,8 @@ data: {"id":"chatcmpl-801","object":"chat.completion.chunk","created":1789103128
 | 27-mac-mini | yes | `AuthKey_CABZCFW333.p8` | 1.98.0 (Homebrew, no rustup) | v26.8.1 / 11.25.0 | 27.0 | present | set, 40 chars | absent | absent |
 | home-mac-mini | yes | `AuthKey_CABZCFW333.p8` | absent | v26.8.1 / 11.24.0 | 27.0 | present | set, 40 chars | absent | absent |
 
+`b3sum` (2026-09-11, `command -v b3sum` in a login shell): absent on the laptop, absent on 27-mac-mini, absent on home-mac-mini; `brew info b3sum` on the laptop shows `b3sum: stable 1.8.7 (bottled)`. Phase A step 1b and the installer preflight install it.
+
 Ollama on 27-mac-mini: brew service `sh.brew.ollama` started 2026-09-11; `ollama list` shows `qwen3.5:4b 3.4 GB`; a chat completion returned `"content":"pong"`.
 
 Codex: 27-mac-mini `codex-cli 0.153.1`, home-mac-mini `codex-cli 0.151.0`, both answered `ALIVE` through the guard; laptop `codex-cli 0.154.0` initially could not refresh its ChatGPT token ("refresh token was already used"); Michael re-ran `codex login` on 2026-09-11 and the laptop then answered `ALIVE` through the guard, so review rounds 4 onward ran locally while the mentee stays on 27-mac-mini.
