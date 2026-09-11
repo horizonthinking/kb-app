@@ -136,7 +136,9 @@ data: {"id":"chatcmpl-801","object":"chat.completion.chunk","created":1789103128
 
 Ollama on 27-mac-mini: brew service `sh.brew.ollama` started 2026-09-11; `ollama list` shows `qwen3.5:4b 3.4 GB`; a chat completion returned `"content":"pong"`.
 
-Codex: 27-mac-mini `codex-cli 0.153.1`, home-mac-mini `codex-cli 0.151.0`, both answered `ALIVE` through the guard; laptop `codex-cli 0.154.0` cannot refresh its ChatGPT token ("refresh token was already used"), so all Codex work runs on 27-mac-mini.
+Codex: 27-mac-mini `codex-cli 0.153.1`, home-mac-mini `codex-cli 0.151.0`, both answered `ALIVE` through the guard; laptop `codex-cli 0.154.0` initially could not refresh its ChatGPT token ("refresh token was already used"); Michael re-ran `codex login` on 2026-09-11 and the laptop then answered `ALIVE` through the guard, so review rounds 4 onward ran locally while the mentee stays on 27-mac-mini.
+
+Release repository (2026-09-11, laptop, `gh` as `horizonthinking`, a User account): `gh repo create horizonthinking/kuku-releases --private` -> `https://github.com/horizonthinking/kuku-releases`; `gh api -X GET repos/horizonthinking/kuku-releases/immutable-releases` -> `{"enabled":false,"enforced_by_owner":false}`; `gh api -X PUT repos/horizonthinking/kuku-releases/immutable-releases` -> (empty body); `GET` again -> `{"enabled":true,"enforced_by_owner":false}`. For comparison `gh api repos/horizonthinking/homebrew-h4/releases` shows the Adapt release with `"draft":false,"immutable":false` and `assets[0].digest = sha256:0731768060b755a907d8ea20833d12547f9381f0a9d3c4989f9ba39f69a65a5c`, confirming the REST `immutable` and `assets[].digest` fields.
 
 ## B. Post-change observations
 (filled in by the overseer after each wave and at release; empty until then)
