@@ -141,7 +141,7 @@ Codex: 27-mac-mini `codex-cli 0.153.1`, home-mac-mini `codex-cli 0.151.0`, both 
 ## B. Post-change observations
 (filled in by the overseer after each wave and at release; empty until then)
 
-## C. Expected vs observed (P1..P17 and per-machine install checks)
+## C. Expected vs observed (P1..P18 and per-machine install checks)
 (filled in at DoD time; a missing row is a failure)
 
 ## D. Explicit unknowns
