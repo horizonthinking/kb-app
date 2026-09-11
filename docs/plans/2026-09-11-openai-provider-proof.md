@@ -140,6 +140,8 @@ Codex: 27-mac-mini `codex-cli 0.153.1`, home-mac-mini `codex-cli 0.151.0`, both 
 
 Release repository (2026-09-11, laptop, `gh` as `horizonthinking`, a User account): `gh repo create horizonthinking/kuku-releases --private` -> `https://github.com/horizonthinking/kuku-releases`; `gh api -X GET repos/horizonthinking/kuku-releases/immutable-releases` -> `{"enabled":false,"enforced_by_owner":false}`; `gh api -X PUT repos/horizonthinking/kuku-releases/immutable-releases` -> (empty body); `GET` again -> `{"enabled":true,"enforced_by_owner":false}`. For comparison `gh api repos/horizonthinking/homebrew-h4/releases` shows the Adapt release with `"draft":false,"immutable":false` and `assets[0].digest = sha256:0731768060b755a907d8ea20833d12547f9381f0a9d3c4989f9ba39f69a65a5c`, confirming the REST `immutable` and `assets[].digest` fields.
 
+Repository initialization and consumer access precheck (2026-09-11, laptop): `gh api -X PUT repos/horizonthinking/kuku-releases/contents/README.md` (artifact-only README) -> `{"commit":"dbf0feb07e16551b34c4bdcc43c683c47b42f81c","path":"README.md"}`; `gh api repos/horizonthinking/kuku-releases` -> `{"default_branch":"main","private":true,"visibility":"private"}`; branches -> `main` at `dbf0feb07e16551b34c4bdcc43c683c47b42f81c`. From a login shell on each Mac, `curl -s -o /dev/null -w "%{http_code}"` with `Authorization: Bearer $HOMEBREW_GITHUB_API_TOKEN` (inside the shell, never printed) against `https://api.github.com/repos/horizonthinking/kuku-releases` returned `200` on the laptop, `200` on 27-mac-mini and `200` on home-mac-mini.
+
 ## B. Post-change observations
 (filled in by the overseer after each wave and at release; empty until then)
 
