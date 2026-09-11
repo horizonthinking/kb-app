@@ -1,3 +1,6 @@
+// Connect codegen under src/generated is not linted upstream; Clippy 1.98 fires this lint 80 times there.
+#![allow(clippy::result_large_err)]
+
 #[path = "generated/buffa/mod.rs"]
 pub mod proto;
 
