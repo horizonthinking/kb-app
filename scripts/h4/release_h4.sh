@@ -161,6 +161,59 @@ authenticate_audited_lock() {
   [[ $(process_start "$expected_parent") == "$recorded_start" ]] || { printf 'release_h4: audited lock owner is stale\n' >&2; exit 1; }
 }
 
+assert_audit_ruleset() {
+  local repository=$1 tag_ref=$2 summaries details
+  summaries=$("$gh_cmd" api --paginate "repos/$repository/rulesets")
+  details=$(RULESET_SUMMARIES="$summaries" python3 - <<'PY'
+import json, os
+values=json.loads(os.environ["RULESET_SUMMARIES"] or "[]")
+if values and isinstance(values[0], list): values=[item for page in values for item in page]
+print(" ".join(str(item["id"]) for item in values if item.get("target")=="tag" and item.get("enforcement")=="active"))
+PY
+  )
+  [[ -n "$details" ]] || { printf 'release_h4: active audit-tag ruleset missing for %s\n' "$repository" >&2; return 1; }
+  for ruleset_id in $details; do
+    detail=$("$gh_cmd" api "repos/$repository/rulesets/$ruleset_id")
+    if RULESET_DETAIL="$detail" python3 - "$tag_ref" <<'PY'
+import fnmatch, json, os, sys
+value=json.loads(os.environ["RULESET_DETAIL"])
+conditions=value.get("conditions",{}).get("ref_name",{})
+includes=conditions.get("include",[]); excludes=conditions.get("exclude",[])
+rules={item.get("type"):item for item in value.get("rules",[])}
+assert value.get("target")=="tag" and value.get("enforcement")=="active"
+assert "refs/tags/audit/*" in includes
+assert not any(fnmatch.fnmatch(sys.argv[1], pattern) for pattern in excludes)
+assert "deletion" in rules and "update" in rules
+assert rules["update"].get("parameters",{}).get("update_allows_fetch_and_merge") is False
+assert value.get("bypass_actors",[]) == []
+PY
+    then return 0; fi
+  done
+  printf 'release_h4: audit-tag ruleset does not protect %s in %s\n' "$tag_ref" "$repository" >&2
+  return 1
+}
+
+validate_audit_tag() {
+  local repository_path=$1 github_repository=$2 tag_ref="refs/tags/audit/kuku-$release" local_oid remote_oid commit
+  [[ $(git -C "$repository_path" cat-file -t "audit/kuku-$release" 2>/dev/null) == tag ]] || {
+    printf 'release_h4: annotated audit tag missing in %s\n' "$github_repository" >&2
+    return 1
+  }
+  local_oid=$(git -C "$repository_path" rev-parse "audit/kuku-$release")
+  remote_oid=$(git -C "$repository_path" ls-remote origin "$tag_ref" | awk 'NR==1 {print $1}')
+  [[ -n "$remote_oid" && "$local_oid" == "$remote_oid" ]] || {
+    printf 'release_h4: audit tag object id differs from origin in %s\n' "$github_repository" >&2
+    return 1
+  }
+  commit=$(git -C "$repository_path" rev-parse "audit/kuku-$release^{commit}")
+  git -C "$repository_path" merge-base --is-ancestor "$commit" origin/main || {
+    printf 'release_h4: audit tag is not on origin/main in %s\n' "$github_repository" >&2
+    return 1
+  }
+  assert_audit_ruleset "$github_repository" "$tag_ref" || return 1
+  printf '%s %s\n' "$local_oid" "$commit"
+}
+
 ship_script() {
   local host_name=$1 relative=$2 remote_name hash temporary
   remote_name=$(basename "$relative"); temporary="$remote_name.tmp.$nonce"
@@ -194,26 +247,39 @@ run_consumer_access_checks() {
 }
 
 cleanup_others() {
-  for path in "$release_root/h4-audited" "$release_root/h4-publish" "$release_root/tap-publish"; do
+  local build_host=${RELEASE_H4_BUILD_HOST:-ts-27-mac-mini}
+  local remote_root="/Users/michasmi/projects/apps/kb-app/release-artifacts/h4/$release"
+  local tap_checkout=${H4_TAP_CHECKOUT:-$h4_checkout/live/homebrew-h4}
+  "$ssh_cmd" "$build_host" "KUKU_CLEANUP_BUILD_WORKTREE=1 RELEASE_ROOT='$remote_root' bash -s" <<'REMOTE'
+set -euo pipefail
+repo="$HOME/projects/apps/kb-app"
+src="$RELEASE_ROOT/src"
+if [[ -e "$src" ]]; then
+  [[ -z $(git -C "$src" status --porcelain) ]] || { printf 'release_h4: dirty build-host worktree refused: %s\n' "$src" >&2; exit 1; }
+  git -C "$repo" worktree remove "$src"
+fi
+git -C "$repo" worktree prune
+REMOTE
+  for path in "$release_root/h4-audited" "$release_root/h4-publish"; do
     [[ ! -e "$path" ]] || { [[ -z $(git -C "$path" status --porcelain) ]] || { printf 'release_h4: dirty worktree refused: %s\n' "$path" >&2; exit 1; }; git -C "$h4_checkout" worktree remove "$path"; }
   done
+  path="$release_root/tap-publish"
+  [[ ! -e "$path" ]] || { [[ -z $(git -C "$path" status --porcelain) ]] || { printf 'release_h4: dirty worktree refused: %s\n' "$path" >&2; exit 1; }; git -C "$tap_checkout" worktree remove "$path"; }
   git -C "$h4_checkout" worktree prune
+  [[ "$tap_checkout" == "$h4_checkout" ]] || git -C "$tap_checkout" worktree prune
   printf 'CLEANUP_OTHERS release=%s artifacts=preserved\n' "$release"
 }
 
 ensure_h4_audited() {
-  local commit
+  local commit tag_values
   git -C "$h4_checkout" fetch origin main --tags
-  [[ $(git -C "$h4_checkout" cat-file -t "audit/kuku-$release") == tag ]] || {
-    printf 'release_h4: h4 audit tag is absent or not annotated\n' >&2
-    exit 1
-  }
-  commit=$(git -C "$h4_checkout" rev-parse "audit/kuku-$release^{commit}")
-  git -C "$h4_checkout" merge-base --is-ancestor "$commit" origin/main
+  tag_values=$(validate_audit_tag "$h4_checkout" horizonthinking/h4)
+  read -r _ commit <<<"$tag_values"
   if [[ -e "$h4_audited" ]]; then
     [[ -z $(git -C "$h4_audited" status --porcelain) ]] || { printf 'release_h4: dirty h4-audited worktree refused\n' >&2; exit 1; }
     git -C "$h4_checkout" worktree remove "$h4_audited"
   fi
+  git -C "$h4_checkout" worktree prune
   git -C "$h4_checkout" worktree add --detach "$h4_audited" "$commit"
   [[ -z $(git -C "$h4_audited" status --porcelain) ]]
 }
@@ -678,20 +744,50 @@ PY
     cmp -s "$release_root/draft-body.json" "$release_root/draft-body.readback" || { printf 'release_h4: draft-body receipt readback mismatch; version is burned\n' >&2; exit 1; }
   fi
 
-  if [[ "$test_mode" == 1 ]]; then
-    build_cmd=${RELEASE_H4_BUILD_CMD:-scripts/h4/build_h4.sh}
-    sign_cmd=${RELEASE_H4_SIGN_CMD:-scripts/h4/sign_notarize_dmg.sh}
-    "$build_cmd"
-    "$operator_root/scripts/h4/check_updater_marker.sh" "$release_root/Kuku.app"
-    "$sign_cmd" "$release_root/Kuku.app" "$release_root" "$release"
-  else
-    run_remote_build_and_sign
-  fi
-  dmg="$release_root/Kuku-$release.dmg"; [[ -f "$dmg" ]] || { printf 'release_h4: DMG missing after sign stage\n' >&2; exit 1; }
-  dmg_sha=$(shasum -a 256 "$dmg" | awk '{print $1}')
-  helper_sha=$(shasum -a 256 "$operator_root/scripts/h4/lib/consumer_access_check.sh" | awk '{print $1}')
   kb_sha=$(git rev-parse HEAD)
   h4_sha=$(git -C "$h4_audited" rev-parse HEAD)
+  dmg="$release_root/Kuku-$release.dmg"
+  reuse_dmg=0
+  if [[ -f "$journal" && -f "$dmg" ]] && RECOVERY_RELEASE="$release" RECOVERY_KB_SHA="$kb_sha" RECOVERY_H4_SHA="$h4_sha" python3 - "$journal" "$dmg" <<'PY'
+import hashlib, json, os, sys
+try: value=json.load(open(sys.argv[1],encoding="utf-8"))
+except (OSError,json.JSONDecodeError): raise SystemExit(1)
+required={"release","reviewed_kb_app_sha","reviewed_h4_sha","dmg_sha256","dmg_path","phase"}
+assert required <= set(value)
+assert value["release"]==os.environ["RECOVERY_RELEASE"]
+assert value["reviewed_kb_app_sha"]==os.environ["RECOVERY_KB_SHA"]
+assert value["reviewed_h4_sha"]==os.environ["RECOVERY_H4_SHA"]
+assert value["dmg_path"]==sys.argv[2]
+assert value["phase"] in {"dmg-recorded","published"}
+assert hashlib.sha256(open(sys.argv[2],"rb").read()).hexdigest()==value["dmg_sha256"]
+PY
+  then
+    reuse_dmg=1
+    printf 'PHASE_A_REUSE release=%s build_invocations=0 sign_invocations=0\n' "$release"
+  fi
+  if [[ $reuse_dmg -eq 0 ]]; then
+    if [[ "$test_mode" == 1 ]]; then
+      build_cmd=${RELEASE_H4_BUILD_CMD:-scripts/h4/build_h4.sh}
+      sign_cmd=${RELEASE_H4_SIGN_CMD:-scripts/h4/sign_notarize_dmg.sh}
+      "$build_cmd"
+      "$operator_root/scripts/h4/check_updater_marker.sh" "$release_root/Kuku.app"
+      "$sign_cmd" "$release_root/Kuku.app" "$release_root" "$release"
+    else
+      run_remote_build_and_sign
+    fi
+  fi
+  [[ -f "$dmg" ]] || { printf 'release_h4: DMG missing after sign stage\n' >&2; exit 1; }
+  dmg_sha=$(shasum -a 256 "$dmg" | awk '{print $1}')
+  RECOVERY_PATH="$journal" RECOVERY_RELEASE="$release" RECOVERY_KB_SHA="$kb_sha" RECOVERY_H4_SHA="$h4_sha" RECOVERY_DMG="$dmg" RECOVERY_DMG_SHA="$dmg_sha" python3 - <<'PY'
+import json, os
+path=os.environ["RECOVERY_PATH"]
+value={"release":os.environ["RECOVERY_RELEASE"],"reviewed_kb_app_sha":os.environ["RECOVERY_KB_SHA"],"reviewed_h4_sha":os.environ["RECOVERY_H4_SHA"],"dmg_sha256":os.environ["RECOVERY_DMG_SHA"],"dmg_path":os.environ["RECOVERY_DMG"],"phase":"dmg-recorded"}
+tmp=path+".tmp"
+with open(tmp,"w",encoding="utf-8") as handle:
+ json.dump(value,handle,sort_keys=True,separators=(",",":")); handle.write("\n"); handle.flush(); os.fsync(handle.fileno())
+os.replace(tmp,path)
+PY
+  helper_sha=$(shasum -a 256 "$operator_root/scripts/h4/lib/consumer_access_check.sh" | awk '{print $1}')
   ensure_dmg_smoke_receipt "$dmg" "$dmg_sha" "$kb_sha" "$h4_sha"
   kb_tag_object=$(git rev-parse "audit/kuku-$release")
   h4_tag_object=$(git -C "$h4_checkout" rev-parse "audit/kuku-$release")
@@ -764,6 +860,14 @@ with open(temporary, "w", encoding="utf-8") as handle:
 os.replace(temporary, path)
 PY
   RELEASE_H4_CONSUMER_HELPER_SHA256="$helper_sha" "$publisher" converge "$release" "$release_id" "$receipt"
+  JOURNAL_PATH="$journal" python3 - <<'PY'
+import json, os
+path=os.environ["JOURNAL_PATH"]; value=json.load(open(path,encoding="utf-8")); value["phase"]="published"
+tmp=path+".tmp"
+with open(tmp,"w",encoding="utf-8") as handle:
+ json.dump(value,handle,sort_keys=True,separators=(",",":")); handle.write("\n"); handle.flush(); os.fsync(handle.fileno())
+os.replace(tmp,path)
+PY
   printf 'RELEASE release=%s state=published\n' "$release"
 }
 
@@ -784,8 +888,8 @@ assert_coordinator
 acquire_lock
 mkdir -p "$release_root"
 git -C "$operator_root" fetch origin --tags
-audit_commit=$(git -C "$operator_root" rev-parse "audit/kuku-$release^{commit}")
-git -C "$operator_root" merge-base --is-ancestor "$audit_commit" origin/main
+tag_values=$(validate_audit_tag "$operator_root" horizonthinking/kb-app)
+read -r _ audit_commit <<<"$tag_values"
 running_hash=$(git -C "$operator_root" hash-object "$script_path")
 audited_hash=$(git -C "$operator_root" rev-parse "audit/kuku-$release:scripts/h4/release_h4.sh")
 [[ "$running_hash" == "$audited_hash" ]] || { printf 'release_h4: stale launcher; run scripts/h4/release_h4.sh from a checkout at audit/kuku-%s\n' "$release" >&2; exit 1; }
@@ -793,11 +897,12 @@ src="$release_root/src"
 if [[ -e "$src" ]]; then
   [[ $(git -C "$src" rev-parse HEAD) == "$audit_commit" && -z $(git -C "$src" status --porcelain) ]] || exit 1
 else
+  git -C "$operator_root" worktree prune
   git -C "$operator_root" worktree add --detach "$src" "$audit_commit"
 fi
 
 if [[ "$operation" == cleanup ]]; then
-  RELEASE_H4_STAGE=audited RELEASE_H4_LOCK_INHERITED=1 "$src/scripts/h4/release_h4.sh" cleanup-others "$release"
+  (cd "$src" && RELEASE_H4_STAGE=audited RELEASE_H4_LOCK_INHERITED=1 exec "$src/scripts/h4/release_h4.sh" cleanup-others "$release")
   [[ -z $(git -C "$src" status --porcelain) ]] || exit 1
   git -C "$operator_root" worktree remove "$src"
   git -C "$operator_root" worktree prune

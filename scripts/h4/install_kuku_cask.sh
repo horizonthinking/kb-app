@@ -185,7 +185,11 @@ if [[ "$mode" == withdraw ]]; then
   fi
   write_record restored "$backup_path" "$recorded_version" "$timestamp"
   [[ -z $(installed_identity) ]] || exit 1
-  pgrep -x Kuku >/dev/null 2>&1 && exit 1
+  process_name=$(plutil -extract CFBundleExecutable raw -o - "$app_path/Contents/Info.plist" 2>/dev/null || true)
+  if [[ -e "$app_path" ]]; then
+    [[ "$process_name" == kuku-app ]] || { printf 'install_kuku_cask: expected CFBundleExecutable kuku-app, observed %s\n' "${process_name:-missing}" >&2; exit 1; }
+    pgrep -x "$process_name" >/dev/null 2>&1 && exit 1
+  fi
   printf 'WITHDRAW state=restored backup=%s\n' "${backup_path:-none}"
   exit 0
 fi

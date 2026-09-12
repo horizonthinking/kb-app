@@ -31,7 +31,7 @@ run_case() {
     printf '{"existingIndexer":true}\n' >"$home/.kuku/plugins/core-indexer/settings.json"
   fi
   cp "$real_b3sum" "$fake/b3sum"
-  for command in open pgrep pkill ps sqlite3 screencapture mv sleep; do
+  for command in plutil open pgrep pkill ps sqlite3 screencapture mv sleep; do
     printf '#!/usr/bin/env bash\nexec %q %q "$@"\n' "$repo_root/scripts/h4/smoke_kuku_app_test.sh" "$command" >"$fake/$command"
     chmod +x "$fake/$command"
   done
@@ -59,7 +59,7 @@ run_case() {
   printf 'PASS %s\n' "$name"
 }
 
-if [[ "${1:-}" == "open" || "${1:-}" == "pgrep" || "${1:-}" == "pkill" || "${1:-}" == "ps" || "${1:-}" == "sqlite3" || "${1:-}" == "screencapture" || "${1:-}" == "mv" || "${1:-}" == "sleep" ]]; then
+if [[ "${1:-}" == "plutil" || "${1:-}" == "open" || "${1:-}" == "pgrep" || "${1:-}" == "pkill" || "${1:-}" == "ps" || "${1:-}" == "sqlite3" || "${1:-}" == "screencapture" || "${1:-}" == "mv" || "${1:-}" == "sleep" ]]; then
   command=$1
   shift
   python3 - "$command" "$@" <<'PY'
@@ -76,7 +76,11 @@ args = sys.argv[2:]
 root = pathlib.Path(os.environ["FAKE_SMOKE_ROOT"])
 mode = os.environ.get("FAKE_SMOKE_MODE", "happy")
 running = root / "running"
-if command == "open":
+if command == "plutil":
+    assert args == ["-extract", "CFBundleExecutable", "raw", "-o", "-", os.environ["FAKE_APP"] + "/Contents/Info.plist"]
+    print("kuku-app")
+elif command == "open":
+    assert args == ["-n", os.environ["FAKE_APP"]]
     running.write_text("4242")
     settings = json.loads((pathlib.Path.home() / ".kuku/settings.json").read_text())
     vault = str(pathlib.Path(settings["last_opened_vault"]).resolve())
@@ -85,13 +89,15 @@ if command == "open":
     db = pathlib.Path.home() / ".kuku/search" / f"{digest}.sqlite3"
     db.touch()
 elif command == "pgrep":
+    assert args == ["-x", "kuku-app"]
     if running.exists(): print("4242")
     else: raise SystemExit(1)
 elif command == "pkill":
+    assert args == ["-x", "kuku-app"]
     running.unlink(missing_ok=True)
 elif command == "ps":
-    if mode == "outside": print("/Applications/Other.app/Contents/MacOS/Kuku")
-    else: print(os.environ["FAKE_APP"] + "/Contents/MacOS/Kuku")
+    if mode == "outside": print("/Applications/Other.app/Contents/MacOS/kuku-app")
+    else: print(os.environ["FAKE_APP"] + "/Contents/MacOS/kuku-app")
 elif command == "sqlite3":
     print("0" if mode == "never_one" else "1")
 elif command == "screencapture":

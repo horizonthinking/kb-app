@@ -23,6 +23,12 @@ command -v b3sum >/dev/null 2>&1 || {
   exit 1
 }
 
+process_name=$(plutil -extract CFBundleExecutable raw -o - "$app_path/Contents/Info.plist" 2>/dev/null || true)
+[[ "$process_name" == kuku-app ]] || {
+  printf 'smoke_kuku_app: expected CFBundleExecutable kuku-app, observed %s\n' "${process_name:-missing}" >&2
+  exit 1
+}
+
 data_root="$HOME/.kuku"
 settings_path="$data_root/settings.json"
 indexer_path="$data_root/plugins/core-indexer/settings.json"
@@ -63,7 +69,7 @@ restore_file() {
 wait_for_exit() {
   local limit=${KUKU_SMOKE_EXIT_POLLS:-50}
   for ((i = 0; i < limit; i++)); do
-    pgrep -x Kuku >/dev/null 2>&1 || return 0
+    pgrep -x "$process_name" >/dev/null 2>&1 || return 0
     sleep 0.1
   done
   return 1
@@ -74,7 +80,7 @@ cleanup() {
   [[ $cleanup_started -eq 0 ]] || exit "$incoming"
   cleanup_started=1
   set +e
-  pkill -x Kuku >/dev/null 2>&1
+  pkill -x "$process_name" >/dev/null 2>&1
   wait_for_exit || cleanup_status=1
   restore_file "$settings_path" settings.json || cleanup_status=1
   restore_file "$indexer_path" indexer.json || cleanup_status=1
@@ -95,7 +101,7 @@ trap cleanup EXIT INT TERM
 
 backup_file "$settings_path" settings.json
 backup_file "$indexer_path" indexer.json
-pkill -x Kuku >/dev/null 2>&1 || true
+pkill -x "$process_name" >/dev/null 2>&1 || true
 wait_for_exit || {
   printf 'smoke_kuku_app: Kuku did not quit before configuration\n' >&2
   exit 1
@@ -152,10 +158,10 @@ path_hash=$(printf '%s' "$canonical_vault" | b3sum --no-names | tr -d '[:space:]
 }
 db_path="$search_root/$path_hash.sqlite3"
 
-open "$app_path"
+open -n "$app_path"
 pid=
 for ((i = 0; i < ${KUKU_SMOKE_LAUNCH_POLLS:-100}; i++)); do
-  mapfile_output=$(pgrep -x Kuku 2>/dev/null || true)
+  mapfile_output=$(pgrep -x "$process_name" 2>/dev/null || true)
   count=$(printf '%s\n' "$mapfile_output" | awk 'NF { count++ } END { print count + 0 }')
   if [[ $count -eq 1 ]]; then
     pid=$mapfile_output
@@ -164,7 +170,7 @@ for ((i = 0; i < ${KUKU_SMOKE_LAUNCH_POLLS:-100}; i++)); do
   sleep 0.1
 done
 [[ -n "$pid" ]] || {
-  printf 'smoke_kuku_app: expected exactly one Kuku process\n' >&2
+  printf 'smoke_kuku_app: expected exactly one %s process\n' "$process_name" >&2
   exit 1
 }
 executable=$(ps -o comm= -p "$pid" | sed 's/^[[:space:]]*//')

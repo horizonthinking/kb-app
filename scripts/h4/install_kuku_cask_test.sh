@@ -2,150 +2,473 @@
 # ---
 # asset: kuku-h4-cask-installer-test
 # type: test-script
-# description: Exercise the canonical Kuku cask bootstrap, identity, collision, install, rollback, withdrawal, and restoration cases with isolated fakes.
+# description: Behavioural tests for Kuku cask bootstrap, identity, collision, install, rollback, withdrawal, and recovery.
 # owner: michael
 # status: active
 # ---
 
 set -euo pipefail
 
-repo_root=$(git rev-parse --show-toplevel)
-installer="$repo_root/scripts/h4/install_kuku_cask.sh"
-real_b3sum=$(command -v b3sum 2>/dev/null || true)
-[[ -n "$real_b3sum" ]] || real_b3sum=/private/tmp/kuku-wave3-b3sum/bin/b3sum
-[[ -x "$real_b3sum" ]] || { printf 'install_kuku_cask_test: b3sum unavailable\n' >&2; exit 1; }
-test_root=$(mktemp -d /private/tmp/kuku-install-test.XXXXXX)
-trap 'rm -rf "$test_root"' EXIT
-
 make_tool() {
-  local dir=$1 name=$2
-  printf '#!/usr/bin/env bash\nexport PATH=%q\nexec %q __fake__ %q "$@"\n' "$PATH" "$0" "$name" >"$dir/$name"
-  chmod +x "$dir/$name"
+  local name=$1
+  printf '#!/usr/bin/env bash\nexec %q __fake__ %q "$@"\n' "$0" "$name" >"$bin/$name"
+  chmod +x "$bin/$name"
 }
 
 if [[ "${1:-}" == __fake__ ]]; then
-  tool=$2; shift 2
+  tool=$2
+  shift 2
   state=${FAKE_INSTALL_STATE:?}
+  printf '%s' "$tool" >>"$state/calls.log"
+  printf ' %q' "$@" >>"$state/calls.log"
+  printf '\n' >>"$state/calls.log"
   case "$tool" in
     brew)
-      printf '%s\n' "$*" >>"$state/brew.log"
-      if [[ "$1" == tap-info ]]; then [[ -f "$state/tapped" ]] && printf '{}\n' || exit 1
-      elif [[ "$1" == tap ]]; then : >"$state/tapped"
-      elif [[ "$1" == --repo ]]; then cat "$state/tap_path"
-      elif [[ "$1" == trust ]]; then [[ "${FAKE_TRUST_FAIL:-0}" != 1 ]]
-      elif [[ "$1" == update ]]; then [[ "${FAKE_UPDATE_FAIL:-0}" != 1 ]]
-      elif [[ "$1" == info ]]; then
-        tap=horizonthinking/h4; full=horizonthinking/h4/kuku; version=
-        [[ -f "$state/installed" ]] && version=$(cat "$state/installed")
-        if [[ -f "$state/foreign" ]]; then tap=kuku-mom/kuku; full=kuku-mom/kuku/kuku; version=0.5.4; fi
-        if [[ -n "$version" ]]; then
-          printf '{"casks":[{"token":"kuku","tap":"%s","full_token":"%s","installed":["%s"]}]}\n' "$tap" "$full" "$version"
-        else printf '{"casks":[]}\n'; fi
-      elif [[ "$1" == list ]]; then [[ -f "$state/installed" ]]
-      elif [[ "$1" == install && "${2:-}" == b3sum ]]; then cp "$state/real_b3sum" "$state/bin/b3sum"
-      elif [[ "$1" == install ]]; then printf '0.5.8-h4.1\n' >"$state/installed"
-      elif [[ "$1" == upgrade ]]; then [[ "${FAKE_UPGRADE_FAIL:-0}" != 1 ]] && printf '0.5.8-h4.1\n' >"$state/installed"
-      elif [[ "$1" == uninstall ]]; then rm -f "$state/installed"; rm -rf "${FAKE_APP:?}"
-      else exit 90; fi
+      command=${1:-}
+      case "$command" in
+        tap-info) [[ -f "$state/tapped" ]] ;;
+        tap)
+          [[ "$*" == 'tap horizonthinking/h4 git@github.com:horizonthinking/homebrew-h4.git' ]]
+          : >"$state/tapped"
+          ;;
+        --repo) printf '%s\n' "$state/tap" ;;
+        trust) [[ ! -f "$state/fail_trust" ]] || exit 40 ;;
+        update)
+          [[ ! -f "$state/fail_update" ]] || exit 41
+          cp "$state/origin_head" "$state/local_head"
+          ;;
+        info)
+          [[ "$*" == 'info --cask --json=v2 --installed' ]] || exit 42
+          if [[ -f "$state/installed" ]]; then
+            version=$(<"$state/installed")
+            tap_name=horizonthinking/h4
+            full_token=horizonthinking/h4/kuku
+            if [[ -f "$state/foreign" ]]; then
+              tap_name=kuku-mom/kuku
+              full_token=kuku-mom/kuku/kuku
+            fi
+            printf '{"casks":[{"token":"kuku","tap":"%s","full_token":"%s","installed":["%s"]}' "$tap_name" "$full_token" "$version"
+            [[ ! -f "$state/two_taps" ]] || printf ',{"token":"other","tap":"kuku-mom/kuku","full_token":"kuku-mom/kuku/other","installed":["1.0"]}'
+            printf ']}\n'
+          else
+            printf '{"casks":[]}\n'
+          fi
+          ;;
+        list) [[ -f "$state/installed" ]] ;;
+        install)
+          if [[ "${2:-}" == b3sum ]]; then
+            cp "$state/real_b3sum" "$state/bin/b3sum"
+            chmod +x "$state/bin/b3sum"
+          else
+            version=$(sed -nE 's/^[[:space:]]*version "([^"]+)"/\1/p' "$state/tap/Casks/kuku.rb")
+            printf '%s\n' "$version" >"$state/installed"
+            mkdir -p "$FAKE_APP/Contents"
+            printf '%s\n' "${version%%-h4.*}" >"$FAKE_APP/Contents/version"
+          fi
+          ;;
+        upgrade)
+          [[ ! -f "$state/fail_upgrade" ]] || exit 43
+          version=$(sed -nE 's/^[[:space:]]*version "([^"]+)"/\1/p' "$state/tap/Casks/kuku.rb")
+          printf '%s\n' "$version" >"$state/installed"
+          mkdir -p "$FAKE_APP/Contents"
+          printf '%s\n' "${version%%-h4.*}" >"$FAKE_APP/Contents/version"
+          ;;
+        uninstall)
+          rm -f "$state/installed"
+          rm -rf "$FAKE_APP"
+          ;;
+        *) exit 44 ;;
+      esac
+      ;;
+    git)
+      if [[ "$*" == *'remote get-url origin'* ]]; then
+        [[ ! -f "$state/wrong_remote" ]] && printf '%s\n' 'git@github.com:horizonthinking/homebrew-h4.git' || printf '%s\n' wrong
+      elif [[ "$*" == *'fetch origin main'* ]]; then
+        :
+      elif [[ "$*" == *'rev-parse origin/main'* ]]; then
+        cat "$state/origin_head"
+      elif [[ "$*" == *'rev-parse HEAD'* ]]; then
+        cat "$state/local_head"
+      else
+        exit 45
+      fi
       ;;
     defaults)
       key=${*: -1}
       case "$key" in
-        CFBundleIdentifier) printf 'mom.kuku.app\n' ;;
-        CFBundleShortVersionString) printf '%s\n' "${FAKE_APP_VERSION:-0.5.8}" ;;
-        CFBundleVersion) printf '%s\n' "${FAKE_BUNDLE_VERSION:-5.8.1}" ;;
+        CFBundleIdentifier) [[ ! -f "$state/unowned" ]] && printf 'mom.kuku.app\n' || printf 'com.example.foreign\n' ;;
+        CFBundleShortVersionString)
+          plist=${*: -2:1}
+          version_file=${plist%/Contents/Info.plist}/Contents/version
+          [[ -f "$version_file" ]] && cat "$version_file" || printf '0.5.4\n'
+          ;;
+        CFBundleVersion) printf '5.8.1\n' ;;
+        CFBundleExecutable) printf 'kuku-app\n' ;;
+        *) exit 46 ;;
       esac
       ;;
-    git)
-      if [[ "$*" == *"remote get-url origin"* ]]; then
-        [[ -f "$state/wrong_remote" ]] && printf 'wrong\n' || printf 'git@github.com:horizonthinking/homebrew-h4.git\n'
-      elif [[ "$*" == *"rev-parse HEAD"* || "$*" == *"rev-parse origin/main"* ]]; then printf 'same\n'
-      elif [[ "$*" == *"fetch origin main"* ]]; then exit 0
-      else exit 92
-      fi
+    plutil)
+      [[ "$*" == "-extract CFBundleExecutable raw -o - $FAKE_APP/Contents/Info.plist" ]] || exit 46
+      printf 'kuku-app\n'
       ;;
     codesign) printf 'Authority=Developer ID Application\nTeamIdentifier=8P9788YC9P\nflags=0x10000(runtime)\n' >&2 ;;
     spctl) printf 'source=Notarized Developer ID\n' >&2 ;;
-    xcrun) exit 0 ;;
-    pgrep) exit 1 ;;
-    smoke|smoke_kuku_app.sh)
-      printf '%s\n' smoke >>"$state/smoke.log"
-      [[ "${FAKE_SMOKE_FAIL:-0}" != 1 ]]
+    xcrun) : ;;
+    pgrep)
+      [[ "$*" == '-x kuku-app' ]] || exit 47
+      exit 1
       ;;
-    *) exit 91 ;;
+    smoke)
+      printf 'smoke\n' >>"$state/smoke.log"
+      [[ ! -f "$state/fail_smoke" ]] || exit 51
+      ;;
+    mv)
+      source_path=${*: -2:1}
+      target_path=${*: -1}
+      if [[ "$source_path" == *Kuku.app* || "$target_path" == *Kuku.app* ]]; then
+        if [[ -f "$state/mv_fail_before" ]]; then rm -f "$state/mv_fail_before"; exit 48; fi
+        if [[ -f "$state/mv_fail_after" ]]; then
+          /bin/mv "$source_path" "$target_path"
+          rm -f "$state/mv_fail_after"
+          exit 49
+        fi
+      fi
+      /bin/mv "$@"
+      ;;
+    date)
+      count=0
+      [[ ! -f "$state/date_count" ]] || count=$(<"$state/date_count")
+      count=$((count + 1))
+      printf '%s\n' "$count" >"$state/date_count"
+      timestamp=$(printf '2026-09-11T00:00:%02dZ' "$count")
+      if [[ -f "$state/date_creates_backup" ]]; then
+        mkdir -p "$HOME/Desktop/Kuku.app.pre-brew-${timestamp//:/-}-$PPID"
+        rm -f "$state/date_creates_backup"
+      fi
+      printf '%s\n' "$timestamp"
+      ;;
+    rg) exec "$FAKE_REAL_RG" "$@" ;;
+    *) exit 50 ;;
   esac
-  exit
+  exit 0
 fi
 
-run_case() {
-  local name=$1 mode=${2:-install} setup=${3:-none} expected=${4:-success}
-  local root home bin tap bare app output status
-  root="$test_root/$name"; home="$root/home"; bin="$root/bin"; tap="$root/tap"; bare="$root/tap.git"; app="$root/Applications/Kuku.app"
-  mkdir -p "$home/.kuku" "$home/.local/bin/h4-kuku" "$home/Desktop" "$bin" "$app/Contents" "$tap/Casks"
-  git init --bare -q "$bare"
-  git -C "$tap" init -q -b main
-  git -C "$tap" config user.email test@example.com; git -C "$tap" config user.name Test
-  printf 'cask "kuku" do\n  version "0.5.8-h4.1"\nend\n' >"$tap/Casks/kuku.rb"
-  git -C "$tap" add -A; git -C "$tap" commit -qm seed; git -C "$tap" remote add origin "$bare"; git -C "$tap" push -q -u origin main
-  printf '%s\n' "$tap" >"$root/tap_path"; : >"$root/tapped"; : >"$root/brew.log"; cp "$real_b3sum" "$root/real_b3sum"
-  for tool in brew defaults codesign spctl xcrun pgrep git; do make_tool "$bin" "$tool"; done
-  make_tool "$home/.local/bin/h4-kuku" smoke_kuku_app.sh
-  case "$setup" in
-    absent_tap) rm "$root/tapped" ;;
-    wrong_remote) : >"$root/wrong_remote" ;;
-    installed) printf '0.5.7-h4.1\n' >"$root/installed" ;;
-    foreign) : >"$root/foreign" ;;
-    collision) mkdir -p "$app" ;;
-    withdraw_backup)
-      printf '0.5.8-h4.1\n' >"$root/installed"
-      backup="$home/Desktop/Kuku.app.pre-brew-test"; mkdir -p "$backup/Contents"
-      printf '{"backup_path":"%s","state":"installed","timestamp":"2026-09-11T00:00:00Z","version":"0.5.4"}\n' "$backup" >"$home/.kuku/h4-install-backup.json"
-      ;;
-  esac
-  args=(0.5.8-h4.1)
-  [[ "$mode" == rollback ]] && args=(--rollback 0.5.8-h4.1)
-  [[ "$mode" == withdraw ]] && args=(--withdraw)
-  set +e
-  output=$(env HOME="$home" PATH="$bin:$PATH" FAKE_INSTALL_STATE="$root" FAKE_APP="$app" KUKU_INSTALL_APP_PATH="$app" \
-    ${CASE_ENV:+$CASE_ENV} "$installer" "${args[@]}" 2>&1)
-  status=$?
-  set -e
-  if [[ "$expected" == success ]]; then [[ $status -eq 0 ]] || { printf '%s\n' "$output" >&2; exit 1; }
-  else [[ $status -ne 0 ]] || exit 1; fi
-  printf 'PASS %s\n' "$name"
+repo_root=$(git rev-parse --show-toplevel)
+installer="$repo_root/scripts/h4/install_kuku_cask.sh"
+real_b3sum=$(command -v b3sum)
+real_rg=$(command -v rg)
+test_root=$(mktemp -d /private/tmp/kuku-install-test.XXXXXX)
+trap 'rm -rf "$test_root"' EXIT
+case_count=0
+
+new_case() {
+  name=$1
+  root="$test_root/$name"
+  home="$root/home"
+  bin="$root/bin"
+  tap_repo="$root/tap"
+  app="$root/Applications/Kuku.app"
+  record="$home/.kuku/h4-install-backup.json"
+  mkdir -p "$home/.kuku" "$home/.local/bin/h4-kuku" "$home/Desktop" "$bin" "$tap_repo/Casks" "$(dirname "$app")"
+  printf 'cask "kuku" do\n  version "0.5.8-h4.1"\nend\n' >"$tap_repo/Casks/kuku.rb"
+  printf 'origin-main\n' >"$root/origin_head"
+  printf 'origin-main\n' >"$root/local_head"
+  : >"$root/tapped"
+  : >"$root/calls.log"
+  : >"$root/smoke.log"
+  cp "$real_b3sum" "$root/real_b3sum"
+  for tool in brew defaults plutil git codesign spctl xcrun pgrep mv date rg; do make_tool "$tool"; done
+  make_tool smoke
+  /bin/mv "$bin/smoke" "$home/.local/bin/h4-kuku/smoke_kuku_app.sh"
+  cp "$real_b3sum" "$bin/b3sum"
+  export FAKE_INSTALL_STATE="$root" FAKE_APP="$app" FAKE_REAL_RG="$real_rg"
 }
 
-run_case install_bootstraps_absent_tap_with_ssh_url install absent_tap
-run_case install_refuses_wrong_tap_remote install wrong_remote failure
-CASE_ENV=FAKE_TRUST_FAIL=1 run_case install_brew_trust_failure_fatal install none failure
-CASE_ENV=FAKE_UPDATE_FAIL=1 run_case install_brew_update_failure_fatal install none failure
-run_case install_installs_when_absent
-run_case install_upgrades_when_present install installed
-CASE_ENV=FAKE_UPGRADE_FAIL=1 run_case install_upgrade_failure_fatal_no_install_attempted install installed failure
-run_case install_refuses_foreign_kuku_cask install foreign failure
-CASE_ENV=FAKE_SMOKE_FAIL=1 run_case install_smoke_invoked_once_and_failure_propagated install none failure
-run_case rollback_uninstall_then_install_pinned_version rollback installed
-run_case withdraw_after_first_install_with_backup withdraw withdraw_backup
+set_installed() {
+  local version=${1:-0.5.8-h4.1}
+  printf '%s\n' "$version" >"$root/installed"
+  mkdir -p "$app/Contents"
+  printf '%s\n' "${version%%-h4.*}" >"$app/Contents/version"
+}
 
-source_text=$(<"$installer")
-required_fragments=(
-  'brew update' 'origin/main' 'brew trust' 'brew info --cask --json=v2 --installed'
-  'b3sum' 'moving' 'moved' 'installed' 'restoring' 'restored'
-  'codesign -dvvv' 'spctl -a -vv -t exec' 'xcrun stapler validate' '"$smoke" --app'
-)
-for fragment in "${required_fragments[@]}"; do [[ "$source_text" == *"$fragment"* ]] || { printf 'missing contract: %s\n' "$fragment" >&2; exit 1; }; done
+set_collision() {
+  mkdir -p "$app/Contents"
+  printf '0.5.4\n' >"$app/Contents/version"
+  printf 'pre-homebrew\n' >"$app/original-marker"
+}
 
-remaining=(
-  install_refreshes_stale_tap_to_origin_main install_refuses_cask_version_mismatch
-  install_verifies_three_identities_via_brew_info_json install_preflights_b3sum
-  install_identity_query_unambiguous_with_two_taps install_moves_aside_non_homebrew_app_collision_free
-  install_refuses_existing_backup_path install_crash_before_backup_move install_crash_after_backup_move_before_moved
-  install_moving_with_both_paths_present_refused install_moving_with_neither_path_refused
-  install_never_overwrites_non_null_backup install_after_withdraw_archives_restored_record
-  rollback_idempotent_on_reentry withdraw_refuses_unowned_app withdraw_skips_uninstall_when_no_h4_cask
-  withdraw_crash_before_restore_move withdraw_crash_after_restore_move_before_restored
-  withdraw_restoring_with_both_paths_present_refused withdraw_restoring_with_neither_path_refused
-  withdraw_after_first_install_without_backup withdraw_idempotent_on_reentry install_withdraw_install_withdraw_generations
-)
-for name in "${remaining[@]}"; do printf 'PASS %s (contract inspection)\n' "$name"; done
-printf 'install_kuku_cask_test: PASS cases=%s\n' "$((11 + ${#remaining[@]}))"
+write_record_fixture() {
+  local record_state=$1 backup=${2:-} version=${3:-}
+  RECORD_PATH="$record" RECORD_STATE="$record_state" RECORD_BACKUP="$backup" RECORD_VERSION="$version" python3 - <<'PY'
+import json, os
+value={"backup_path":os.environ["RECORD_BACKUP"] or None,"version":os.environ["RECORD_VERSION"] or None,"timestamp":"2026-09-10T00:00:00Z","state":os.environ["RECORD_STATE"]}
+with open(os.environ["RECORD_PATH"],"w",encoding="utf-8") as handle: json.dump(value,handle); handle.write("\n")
+PY
+}
+
+run_installer() {
+  expected=$1
+  shift
+  set +e
+  output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" TMPDIR=/private/tmp KUKU_INSTALL_APP_PATH="$app" KUKU_INSTALL_RECORD_PATH="$record" \
+    KUKU_INSTALL_SMOKE_CMD="$home/.local/bin/h4-kuku/smoke_kuku_app.sh" "$installer" "$@" 2>&1)
+  status=$?
+  set -e
+  if [[ "$expected" == success ]]; then
+    [[ $status -eq 0 ]] || { printf 'CASE %s failed status=%s\n%s\n' "$name" "$status" "$output" >&2; exit 1; }
+  else
+    [[ $status -ne 0 ]] || { printf 'CASE %s unexpectedly succeeded\n%s\n' "$name" "$output" >&2; exit 1; }
+  fi
+}
+
+pass() { case_count=$((case_count + 1)); printf 'PASS %s\n' "$1"; }
+count_calls() { rg -c "^$1( |$)" "$root/calls.log" || true; }
+
+new_case install_bootstraps_absent_tap_with_ssh_url
+rm "$root/tapped"
+run_installer success 0.5.8-h4.1
+[[ $(rg -c '^brew tap horizonthinking/h4 git@github\.com:horizonthinking/homebrew-h4\.git$' "$root/calls.log") == 1 ]]
+pass "$name"
+
+new_case install_refuses_wrong_tap_remote
+: >"$root/wrong_remote"
+run_installer failure 0.5.8-h4.1
+[[ $(count_calls 'brew install') == 0 ]]
+pass "$name"
+
+new_case install_brew_trust_failure_fatal
+: >"$root/fail_trust"
+run_installer failure 0.5.8-h4.1
+[[ $(count_calls 'brew update') == 0 ]]
+pass "$name"
+
+new_case install_brew_update_failure_fatal
+: >"$root/fail_update"
+run_installer failure 0.5.8-h4.1
+[[ $(count_calls 'brew install') == 0 ]]
+pass "$name"
+
+new_case install_refreshes_stale_tap_to_origin_main
+printf 'stale\n' >"$root/local_head"
+run_installer success 0.5.8-h4.1
+[[ $(<"$root/local_head") == origin-main && $(count_calls 'brew update') == 1 ]]
+pass "$name"
+
+new_case install_refuses_cask_version_mismatch
+sed -i '' 's/0.5.8-h4.1/0.5.7-h4.1/' "$tap_repo/Casks/kuku.rb"
+run_installer failure 0.5.8-h4.1
+[[ $(count_calls 'brew install') == 0 ]]
+pass "$name"
+
+new_case install_installs_when_absent
+run_installer success 0.5.8-h4.1
+[[ $(<"$root/installed") == 0.5.8-h4.1 && $(count_calls 'brew install') == 1 ]]
+pass "$name"
+
+new_case install_upgrades_when_present
+set_installed 0.5.7-h4.1
+run_installer success 0.5.8-h4.1
+[[ $(<"$root/installed") == 0.5.8-h4.1 && $(count_calls 'brew upgrade') == 1 ]]
+pass "$name"
+
+new_case install_upgrade_failure_fatal_no_install_attempted
+set_installed 0.5.7-h4.1
+: >"$root/fail_upgrade"
+run_installer failure 0.5.8-h4.1
+[[ $(count_calls 'brew upgrade') == 1 && $(count_calls 'brew install') == 0 ]]
+pass "$name"
+
+new_case install_verifies_three_identities_via_brew_info_json
+run_installer success 0.5.8-h4.1
+[[ $(rg -c '^brew info --cask --json=v2 --installed$' "$root/calls.log") -ge 3 ]]
+[[ $(rg -c 'CFBundleShortVersionString$' "$root/calls.log") == 1 && $(rg -c 'CFBundleVersion$' "$root/calls.log") == 1 ]]
+pass "$name"
+
+new_case install_smoke_invoked_once_and_failure_propagated
+: >"$root/fail_smoke"
+run_installer failure 0.5.8-h4.1
+[[ $(wc -l <"$root/smoke.log" | tr -d ' ') == 1 ]]
+pass "$name"
+
+new_case install_preflights_b3sum
+rm "$bin/b3sum"
+run_installer success 0.5.8-h4.1
+[[ -x "$bin/b3sum" && $(rg -c '^brew install b3sum$' "$root/calls.log") == 1 ]]
+pass "$name"
+
+new_case install_refuses_foreign_kuku_cask
+set_installed 0.5.4
+: >"$root/foreign"
+run_installer failure 0.5.8-h4.1
+[[ "$output" == *'must be removed by hand first'* && $(count_calls 'brew upgrade') == 0 ]]
+pass "$name"
+
+new_case install_identity_query_unambiguous_with_two_taps
+: >"$root/two_taps"
+run_installer success 0.5.8-h4.1
+[[ $(rg -c '^brew info --cask --json=v2 --installed$' "$root/calls.log") -ge 3 ]]
+! rg -q '^brew info .*horizonthinking/h4/kuku' "$root/calls.log"
+pass "$name"
+
+new_case install_moves_aside_non_homebrew_app_collision_free
+set_collision
+run_installer success 0.5.8-h4.1
+backup=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["backup_path"])' "$record")
+[[ -f "$backup/original-marker" && -d "$app" && "$backup" != "$app" ]]
+pass "$name"
+
+new_case install_refuses_existing_backup_path
+set_collision
+: >"$root/date_creates_backup"
+run_installer failure 0.5.8-h4.1
+[[ "$output" == *'backup path exists'* && -f "$app/original-marker" ]]
+pass "$name"
+
+new_case install_crash_before_backup_move
+set_collision
+: >"$root/mv_fail_before"
+run_installer failure 0.5.8-h4.1
+[[ $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["state"])' "$record") == moving && -f "$app/original-marker" ]]
+run_installer success 0.5.8-h4.1
+[[ $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["state"])' "$record") == installed ]]
+pass "$name"
+
+new_case install_crash_after_backup_move_before_moved
+set_collision
+: >"$root/mv_fail_after"
+run_installer failure 0.5.8-h4.1
+backup=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["backup_path"])' "$record")
+[[ ! -e "$app" && -f "$backup/original-marker" ]]
+run_installer success 0.5.8-h4.1
+pass "$name"
+
+new_case install_moving_with_both_paths_present_refused
+set_collision
+backup="$home/Desktop/existing-backup.app"; mkdir -p "$backup"
+write_record_fixture moving "$backup" 0.5.4
+run_installer failure 0.5.8-h4.1
+[[ "$output" == *'moving refused'* ]]
+pass "$name"
+
+new_case install_moving_with_neither_path_refused
+backup="$home/Desktop/missing-backup.app"
+write_record_fixture moving "$backup" 0.5.4
+run_installer failure 0.5.8-h4.1
+[[ "$output" == *'moving refused'* ]]
+pass "$name"
+
+new_case install_never_overwrites_non_null_backup
+backup="$home/Desktop/original-backup.app"; mkdir -p "$backup"
+write_record_fixture moved "$backup" 0.5.4
+run_installer success 0.5.8-h4.1
+[[ $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["backup_path"])' "$record") == "$backup" && -d "$backup" ]]
+pass "$name"
+
+new_case install_after_withdraw_archives_restored_record
+set_collision
+write_record_fixture restored "$home/Desktop/consumed.app" 0.5.4
+run_installer success 0.5.8-h4.1
+[[ -f "$home/.kuku/h4-install-backup.2026-09-10T00-00-00Z.json" ]]
+[[ $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["state"])' "$record") == installed ]]
+pass "$name"
+
+new_case rollback_uninstall_then_install_pinned_version
+set_installed 0.5.7-h4.1
+run_installer success --rollback 0.5.8-h4.1
+[[ $(count_calls 'brew uninstall') == 1 && $(count_calls 'brew install') == 1 && $(<"$root/installed") == 0.5.8-h4.1 ]]
+pass "$name"
+
+new_case rollback_idempotent_on_reentry
+set_installed 0.5.8-h4.1
+run_installer success --rollback 0.5.8-h4.1
+[[ $(count_calls 'brew uninstall') == 0 && $(count_calls 'brew install') == 0 ]]
+pass "$name"
+
+new_case withdraw_refuses_unowned_app
+set_installed
+: >"$root/unowned"
+write_record_fixture installed '' ''
+run_installer failure --withdraw
+[[ "$output" == *'does not own'* && $(count_calls 'brew uninstall') == 0 ]]
+pass "$name"
+
+new_case withdraw_skips_uninstall_when_no_h4_cask
+write_record_fixture moved '' ''
+run_installer success --withdraw
+[[ $(count_calls 'brew uninstall') == 0 && $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["state"])' "$record") == restored ]]
+pass "$name"
+
+new_case withdraw_crash_before_restore_move
+set_installed
+backup="$home/Desktop/Kuku.prebrew.app"; mkdir -p "$backup/Contents"; printf '0.5.4\n' >"$backup/Contents/version"
+write_record_fixture installed "$backup" 0.5.4
+: >"$root/mv_fail_before"
+run_installer failure --withdraw
+[[ -d "$backup" && ! -e "$app" ]]
+run_installer success --withdraw
+[[ -d "$app" && ! -e "$backup" ]]
+pass "$name"
+
+new_case withdraw_crash_after_restore_move_before_restored
+set_installed
+backup="$home/Desktop/Kuku.prebrew.app"; mkdir -p "$backup/Contents"; printf '0.5.4\n' >"$backup/Contents/version"
+write_record_fixture installed "$backup" 0.5.4
+: >"$root/mv_fail_after"
+run_installer failure --withdraw
+[[ ! -e "$backup" && -d "$app" ]]
+run_installer success --withdraw
+[[ $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["state"])' "$record") == restored ]]
+pass "$name"
+
+new_case withdraw_restoring_with_both_paths_present_refused
+set_collision
+backup="$home/Desktop/Kuku.prebrew.app"; mkdir -p "$backup"
+write_record_fixture restoring "$backup" 0.5.4
+run_installer failure --withdraw
+[[ "$output" == *'restoring refused'* ]]
+pass "$name"
+
+new_case withdraw_restoring_with_neither_path_refused
+backup="$home/Desktop/Kuku.prebrew.app"
+write_record_fixture restoring "$backup" 0.5.4
+run_installer failure --withdraw
+[[ "$output" == *'restoring refused'* ]]
+pass "$name"
+
+new_case withdraw_after_first_install_with_backup
+set_collision
+run_installer success 0.5.8-h4.1
+backup=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["backup_path"])' "$record")
+run_installer success --withdraw
+[[ -f "$app/original-marker" && ! -e "$backup" && ! -e "$root/installed" ]]
+pass "$name"
+
+new_case withdraw_after_first_install_without_backup
+run_installer success 0.5.8-h4.1
+run_installer success --withdraw
+[[ ! -e "$app" && ! -e "$root/installed" ]]
+pass "$name"
+
+new_case withdraw_idempotent_on_reentry
+set_collision
+run_installer success 0.5.8-h4.1
+run_installer success --withdraw
+uninstalls=$(count_calls 'brew uninstall')
+run_installer success --withdraw
+[[ $(count_calls 'brew uninstall') == "$uninstalls" && "$output" == *'already restored'* ]]
+pass "$name"
+
+new_case install_withdraw_install_withdraw_generations
+set_collision
+run_installer success 0.5.8-h4.1
+first_backup=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["backup_path"])' "$record")
+run_installer success --withdraw
+run_installer success 0.5.8-h4.1
+second_backup=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["backup_path"])' "$record")
+[[ "$first_backup" != "$second_backup" && -f "$home/.kuku/h4-install-backup.2026-09-11T00-00-01Z.json" ]]
+run_installer success --withdraw
+[[ -f "$app/original-marker" && $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["state"])' "$record") == restored ]]
+pass "$name"
+
+[[ $case_count -eq 34 ]]
+printf 'install_kuku_cask_test: PASS cases=%s\n' "$case_count"

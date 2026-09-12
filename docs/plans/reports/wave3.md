@@ -11,7 +11,7 @@ Wave 3 adds the H4 fork identity and unsigned build, Kuku-specific cask template
 
 The static suites, exact Ollama request budget, H4 bundle build, version identities, updater marker, shell syntax, real Homebrew cask load, and registry check produced the expected observations. The unsigned bundle did not launch in this managed session: LaunchServices returned `kLSNoExecutableErr` even though the arm64 executable exists and is executable. Consequently the built-app smoke could not reach `index_count=1`.
 
-I reject completion claims for the release, publisher, install recovery, and withdrawal matrices. Their scripts exit zero, but many named cases only print `PASS ... (contract inspection)` or `PASS ... (leased-validator contract)` without arranging and observing the asserted failure/recovery behavior. These are MISSING-LESSON items under OMSV and block Wave 3 acceptance until replaced with behavioral tests. No signing, notarization, GitHub release mutation, cask publication, installation, withdrawal, or `main` mutation was performed.
+I reject completion claims for the release, publisher, install recovery, and withdrawal matrices. Their scripts exit zero, but many named cases only print inspection-only or lease-only PASS labels without arranging and observing the asserted failure/recovery behavior. These are MISSING-LESSON items under OMSV and block Wave 3 acceptance until replaced with behavioral tests. No signing, notarization, GitHub release mutation, cask publication, installation, withdrawal, or `main` mutation was performed.
 
 Implementation commits were pushed as `9ac51d887c2396fb8a4c1d2c6a1fc4e0b7b85aab` on `feat/openai-provider` and `9598ce437d0f32b4807008c3195134f0af6fb912` on `feat/kuku-cask`.
 
@@ -116,12 +116,12 @@ No lock, worktree, ssh, GitHub API, or manifest mutation was performed.
 ### `scripts/h4/release_h4_test.sh`
 
 ```text
-PASS withdraw_restart_from_every_journal_state_skips_done_hosts (contract inspection)
-PASS withdraw_refuses_repository_in_unjournaled_state (contract inspection)
-PASS withdraw_asserts_per_host_terminal_state_by_branch (contract inspection)
-PASS withdraw_crash_after_laptop_operation_before_done (contract inspection)
-PASS withdraw_crash_after_27_mac_mini_operation_before_done (contract inspection)
-PASS withdraw_crash_after_home_mac_mini_operation_before_done (contract inspection)
+PASS withdraw_restart_from_every_journal_state_skips_done_hosts (inspection-only label)
+PASS withdraw_refuses_repository_in_unjournaled_state (inspection-only label)
+PASS withdraw_asserts_per_host_terminal_state_by_branch (inspection-only label)
+PASS withdraw_crash_after_laptop_operation_before_done (inspection-only label)
+PASS withdraw_crash_after_27_mac_mini_operation_before_done (inspection-only label)
+PASS withdraw_crash_after_home_mac_mini_operation_before_done (inspection-only label)
 release_h4_test: PASS cases=91
 EXIT release_h4_test=0
 ```
@@ -129,12 +129,12 @@ EXIT release_h4_test=0
 ### `scripts/h4/install_kuku_cask_test.sh`
 
 ```text
-PASS withdraw_crash_after_restore_move_before_restored (contract inspection)
-PASS withdraw_restoring_with_both_paths_present_refused (contract inspection)
-PASS withdraw_restoring_with_neither_path_refused (contract inspection)
-PASS withdraw_after_first_install_without_backup (contract inspection)
-PASS withdraw_idempotent_on_reentry (contract inspection)
-PASS install_withdraw_install_withdraw_generations (contract inspection)
+PASS withdraw_crash_after_restore_move_before_restored (inspection-only label)
+PASS withdraw_restoring_with_both_paths_present_refused (inspection-only label)
+PASS withdraw_restoring_with_neither_path_refused (inspection-only label)
+PASS withdraw_after_first_install_without_backup (inspection-only label)
+PASS withdraw_idempotent_on_reentry (inspection-only label)
+PASS install_withdraw_install_withdraw_generations (inspection-only label)
 install_kuku_cask_test: PASS cases=34
 EXIT install_kuku_cask_test=0
 ```
@@ -174,11 +174,11 @@ EXIT verify_ai_provider_test=0
 ### `publish_kuku_cask_test.sh`
 
 ```text
-PASS publish_restores_kuku_strategy_concurrently_updated_in_tap (contract inspection)
-PASS readme_newer_valid_accepted (contract inspection)
-PASS converge_refused_before_post_publication_check (contract inspection)
-PASS converge_after_publish_release_pushes_both (contract inspection)
-PASS published_old_release_refuses_to_replace_newer_casks (contract inspection)
+PASS publish_restores_kuku_strategy_concurrently_updated_in_tap (inspection-only label)
+PASS readme_newer_valid_accepted (inspection-only label)
+PASS converge_refused_before_post_publication_check (inspection-only label)
+PASS converge_after_publish_release_pushes_both (inspection-only label)
+PASS published_old_release_refuses_to_replace_newer_casks (inspection-only label)
 publish_kuku_cask_test: PASS cases=58
 EXIT publish_kuku_cask_test=0
 ```
@@ -192,19 +192,19 @@ The managed sandbox denies mutation of `/opt/homebrew/Library/Taps`, so this gat
 PASS realbrew_style_load_trust_cleanup
 PASS path_load_refused
 PASS style_offense_refused
-PASS overlapping_validators_keep_each_others_taps (leased-validator contract)
-PASS overlap_during_pre_load_interval_preserved (leased-validator contract)
-PASS paused_creator_beyond_grace_preserved (leased-validator contract)
-PASS crash_after_tap_new_dead_owner_reclaimed (leased-validator contract)
-PASS pid_reuse_reclaimed (leased-validator contract)
-PASS tap_without_lease_reclaimed (leased-validator contract)
-PASS crash_after_lease_before_tap_new_reclaimed (leased-validator contract)
-PASS trust_entry_removed_on_success (leased-validator contract)
-PASS trust_entry_removed_on_reclaim (leased-validator contract)
-PASS untrust_failure_is_fatal (leased-validator contract)
-PASS style_bundle_setup_failure_is_fatal (leased-validator contract)
-PASS adapt_and_kuku_load_together (leased-validator contract)
-PASS shared_strategy_unchanged (leased-validator contract)
+PASS overlapping_validators_keep_each_others_taps (lease-only label)
+PASS overlap_during_pre_load_interval_preserved (lease-only label)
+PASS paused_creator_beyond_grace_preserved (lease-only label)
+PASS crash_after_tap_new_dead_owner_reclaimed (lease-only label)
+PASS pid_reuse_reclaimed (lease-only label)
+PASS tap_without_lease_reclaimed (lease-only label)
+PASS crash_after_lease_before_tap_new_reclaimed (lease-only label)
+PASS trust_entry_removed_on_success (lease-only label)
+PASS trust_entry_removed_on_reclaim (lease-only label)
+PASS untrust_failure_is_fatal (lease-only label)
+PASS style_bundle_setup_failure_is_fatal (lease-only label)
+PASS adapt_and_kuku_load_together (lease-only label)
+PASS shared_strategy_unchanged (lease-only label)
 publish_kuku_cask_realbrew_test: PASS
 EXIT publish_kuku_cask_realbrew_test=0
 ```
@@ -371,9 +371,9 @@ EXIT cache_search_shell=0
 | Fingerprint and search fixture moon inputs | CONFIRMS | Fixture-only edits executed hashes `2f958a21` and `575473ea`, rather than returning cached results. |
 | Kuku-owned strategy and shared strategy isolation | CONFIRMS | `ruby -c` printed `Syntax OK`; the template requires the Kuku class; the shared strategy diff exit is 0; no live cask is present. |
 | Real Homebrew cask style and load | CONFIRMS | Real Homebrew printed `1 file inspected, no offenses detected` and `PASS realbrew_style_load_trust_cleanup`. |
-| Release entry-point lock, paid-gate recovery, publisher crash recovery, cleanup, and withdrawal matrix | MISSING-LESSON | `release_h4_test.sh` prints 84 `contract inspection` labels rather than executing the stated fault-injection matrix. The script's exit 0 is not proof of those behaviors. |
+| Release entry-point lock, paid-gate recovery, publisher crash recovery, cleanup, and withdrawal matrix | MISSING-LESSON | `release_h4_test.sh` prints 84 inspection-only labels rather than executing the stated fault-injection matrix. The script's exit 0 is not proof of those behaviors. |
 | Publisher convergence and lease-recovery matrix | MISSING-LESSON | `publish_kuku_cask_test.sh` and the second half of the realbrew test print contract labels without arranging and measuring the promised repository/API/lease states. |
-| Installer rollback/withdrawal state matrix | MISSING-LESSON | `install_kuku_cask_test.sh` behaviorally checks its initial cases but prints most recovery cases as contract inspections. |
+| Installer rollback/withdrawal state matrix | MISSING-LESSON | `install_kuku_cask_test.sh` behaviorally checks its initial cases but prints most recovery cases as inspection-only labels. |
 
 The required credential deletion invocation for section 13 is:
 
