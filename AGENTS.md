@@ -90,7 +90,7 @@ Full stacks: `infra/docker/local` (web :8081, api :8080, mailpit :8025; copy `en
 **`variant.rs` is load-bearing**: the bundle identifier selects `~/.kuku` vs `~/.kuku.dev` vs `~/.kuku.preview` and the keychain service suffix, so dev, preview, and prod never share data or tokens. The three configs: `tauri.conf.json` (prod, `mom.kuku.app`, the real release version), `tauri.development.conf.json` (KukuDev), `tauri.preview.conf.json` (KukuPreview, own updater key, built with `--features devtools`). API URLs are injected per moon task, not read from a file.
 
 ### Rust crates (`crates/`)
-- `kuku-ai` is a Tauri plugin (namespace `kuku-ai`; `build.rs` generates the command ACL, so the `COMMANDS` list, `generate_handler!`, and `src/commands.rs` must stay in sync). `src/session.rs` holds the agent loop: bounded rounds, streaming deltas, tool execution, history compaction at a byte budget, three `ChatMode`s (ask / agent / inline) that gate tools and prompts. Providers: `provider/remote.rs` (Kuku backend over Connect + JSON streaming, the default) and `provider/gemini.rs` (user's own key via rig-core). **Tools never write**: a mutating tool returns a `MutationPlan` with expected checksums, the session emits a pending-approval event and blocks on an approval channel, and only then does the host apply it, reporting Applied / PartiallyApplied / Conflict. Depends on `kuku-contract` only; search reaches it as native tools registered by the desktop crate.
+- `kuku-ai` is a Tauri plugin (namespace `kuku-ai`; `build.rs` generates the command ACL, so the `COMMANDS` list, `generate_handler!`, and `src/commands.rs` must stay in sync). `src/session.rs` holds the agent loop: bounded rounds, streaming deltas, tool execution, history compaction at a byte budget, three `ChatMode`s (ask / agent / inline) that gate tools and prompts. Providers: `provider/remote.rs` (Kuku backend over Connect + JSON streaming, the default), `provider/gemini.rs` (user's own key via rig-core), and `provider/openai.rs` (OpenAI Chat Completions plus compatible endpoints, with optional keys for local hosts). Run the OpenAI-compatible live regression only through `KUKU_TEST_OPENAI_BASE_URL=http://127.0.0.1:11434/v1 KUKU_TEST_OPENAI_MODEL=qwen3.5:4b scripts/h4/verify_ai_provider.sh`; it refuses skipped or incomplete coverage. **Tools never write**: a mutating tool returns a `MutationPlan` with expected checksums, the session emits a pending-approval event and blocks on an approval channel, and only then does the host apply it, reporting Applied / PartiallyApplied / Conflict. Depends on `kuku-contract` only; search reaches it as native tools registered by the desktop crate.
 - `kuku-indexer` is pure, engine-free Markdown extraction (pulldown-cmark): sections, chunks with overlap, CJK normalization, wikilinks, query routing and FTS query building, snippets. The database lives in the desktop crate, not here.
 - `kuku-contract` is a ten-line re-export over generated code.
 
@@ -107,3 +107,18 @@ Static Astro 6. Marketing pages plus `auth/*` and a Solid dashboard SPA at `dash
 ## Release flow
 
 `scripts/release.sh` is the prod path: bumps `version` in `apps/desktop/src-tauri/tauri.conf.json` (the source of truth; the GitHub tag must match it), runs `desktop:tauri-build-prod`, writes the minisign signature into `prod_release.ts` via `apps/web/scripts/update_prod_release_config.mjs write`, builds the web bundle, notarizes and staples the DMG, and prints the manual `gh release create`, Homebrew sha256, and Pages deploy steps. Needs Apple signing/notarization env plus `TAURI_SIGNING_PRIVATE_KEY`. `release-preview.sh` is the same shape without notarization against the preview config; `release-prod-web.sh` builds only the site. Commit `tauri.conf.json` and `prod_release.ts` together after a release.
+
+### Fork release (H4 tap)
+
+The H4 fork uses `apps/desktop/src-tauri/tauri.h4.conf.json` and the scripts under `scripts/h4/`. Its public release interface has exactly four operations:
+
+```text
+scripts/h4/release_h4.sh <version>
+scripts/h4/release_h4.sh install <release> <host>
+scripts/h4/release_h4.sh withdraw <release>
+scripts/h4/release_h4.sh cleanup <release>
+```
+
+Install accepts only `laptop-m3`, `ts-27-mac-mini`, or `ts-home-mac-mini`. It ships and hash-verifies the audited installer and smoke scripts; the same installer implements rollback and withdrawal. A foreign Homebrew cask named `kuku` is refused and must be removed by hand.
+
+Wave 3b is an overseer-run recorded promotion. It merges both audited branches, transactionally updates the artifact repository README, installs active audit-tag rulesets, creates the protected `audit/kuku-*` tags once, and records the proof. Any new build number, including a replacement for a burned attempt, goes through the reviewed corrective cycle and another Wave 3b promotion. Published releases and tags are immutable and are never deleted.

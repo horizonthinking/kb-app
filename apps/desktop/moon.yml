@@ -113,7 +113,7 @@ tasks:
       cache: false
 
   tauri-build-h4:
-    command: "tauri build --config src-tauri/tauri.h4.conf.json"
+    command: "bash -c 'tauri build --config src-tauri/tauri.h4.conf.json && mkdir -p ../../target/release/bundle/macos/Kuku.app/Contents/Resources/frontend-assets && cp dist/assets/entry-*.js ../../target/release/bundle/macos/Kuku.app/Contents/Resources/frontend-assets/'"
     env:
       VITE_KUKU_API_URL: "https://api.kuku.mom"
       VITE_KUKU_WEB_URL: "https://www.kuku.mom"
@@ -175,6 +175,7 @@ tasks:
     toolchains: ["rust"]
     inputs:
       - "src-tauri/**/*.rs"
+      - "src-tauri/fixtures/**/*.json"
       - "src-tauri/Cargo.toml"
       - "/Cargo.toml"
       - "/Cargo.lock"

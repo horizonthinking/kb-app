@@ -100,3 +100,14 @@ For operational details, start with the READMEs and `env.example` files under `i
 ## Release Notes
 
 Release metadata for the website and updater lives in `apps/web/src/config/prod_release.ts`, while the desktop bundle version lives in `apps/desktop/src-tauri/tauri.conf.json`.
+
+The AI settings also support OpenAI Chat Completions compatible endpoints. For a local Ollama instance, use base URL `http://127.0.0.1:11434/v1`, leave the API key empty, and select the locally installed model. Validate the production adapter with:
+
+```bash
+KUKU_TEST_OPENAI_BASE_URL=http://127.0.0.1:11434/v1 \
+KUKU_TEST_OPENAI_MODEL=qwen3.5:4b \
+KUKU_LIVE_REQUEST_LOG=/private/tmp/kuku-live-provider.log \
+scripts/h4/verify_ai_provider.sh
+```
+
+The H4 fork has separate release metadata in `apps/desktop/src-tauri/tauri.h4.conf.json` and a single release interface at `scripts/h4/release_h4.sh`. This is independent of the upstream website and updater metadata. The H4 build disables the app updater and advances through Homebrew releases.

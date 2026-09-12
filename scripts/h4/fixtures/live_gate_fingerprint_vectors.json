@@ -1,0 +1,23 @@
+[
+  {
+    "base_url": "HTTPS://API.OPENAI.COM/v1/",
+    "model": "gpt-5-nano",
+    "verifier_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "api_key": null,
+    "expected": "73031f0f502a3556c36cea4864bd7726a290a8008a15590f32aa424c8ae32455"
+  },
+  {
+    "base_url": "http://127.0.0.1:11434/v1/",
+    "model": "qwen3.5:4b",
+    "verifier_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "api_key": null,
+    "expected": "4082d4c95e890cbe94793acb496aebeae8418f5203d92746798dc30daa769629"
+  },
+  {
+    "base_url": "https://OPENROUTER.ai/api/v1/",
+    "model": "model-x",
+    "verifier_sha256": "1212121212121212121212121212121212121212121212121212121212121212",
+    "api_key": "  sk-test  ",
+    "expected": "41a1142ef8e352a26a1f6ebcc68e846df14f01026aacf4410d12fad3ae06500e"
+  }
+]

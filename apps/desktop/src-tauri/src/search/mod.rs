@@ -823,11 +823,18 @@ pub fn to_relative_path(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::search::db::{IndexedChunkRow, IndexedDocument};
+
+    #[derive(Debug, Deserialize)]
+    struct SearchDbPathVector {
+        canonical_path: String,
+        expected_hex: String,
+    }
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -966,6 +973,25 @@ mod tests {
         let first = search_db_path(&root, &IndexerStorageLocation::AppGlobal).unwrap();
         let second = search_db_path(&root, &IndexerStorageLocation::AppGlobal).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn search_db_path_matches_shared_vectors() {
+        let vectors: Vec<SearchDbPathVector> =
+            serde_json::from_str(include_str!("../../fixtures/search_db_path_vectors.json"))
+                .expect("parse search path vectors");
+        assert_eq!(vectors.len(), 2);
+        for vector in vectors {
+            let root = Path::new(&vector.canonical_path);
+            assert_eq!(fs::canonicalize(root).unwrap(), root);
+            let db_path = search_db_path(root, &IndexerStorageLocation::AppGlobal).unwrap();
+            let expected_filename = format!("{}.sqlite3", vector.expected_hex);
+            assert_eq!(
+                db_path.file_name().and_then(|value| value.to_str()),
+                Some(expected_filename.as_str())
+            );
+            assert_eq!(hash_path(root), vector.expected_hex);
+        }
     }
 
     #[test]

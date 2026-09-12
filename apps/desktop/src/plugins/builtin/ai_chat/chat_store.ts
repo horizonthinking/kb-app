@@ -694,10 +694,11 @@ async function cancelSession(): Promise<void> {
 async function loadConfig(): Promise<void> {
   setChatState("config", "loading", true);
   setChatState("config", "error", null);
+  const defaults = createDefaultAiConfig();
   try {
     const config = await loadPluginSettings<AiConfig>({
       pluginId: AI_CHAT_SETTINGS_PLUGIN_ID,
-      defaults: createDefaultAiConfig(),
+      defaults,
       secureKeys: [...AI_CHAT_SECURE_KEYS],
       normalize: (raw) => normalizeAiConfig(raw),
     });
@@ -705,12 +706,25 @@ async function loadConfig(): Promise<void> {
     // model selection is user-owned and must round-trip unchanged.
     config.serverUrl = DEFAULT_SERVER_URL;
     config.model = modelForProvider(config.provider ?? DEFAULT_PROVIDER, config);
-    await savePluginSettings(AI_CHAT_SETTINGS_PLUGIN_ID, config, [...AI_CHAT_SECURE_KEYS]);
-    await invoke<void>("plugin:kuku-ai|ai_set_config", { config });
+    try {
+      await invoke<void>("plugin:kuku-ai|ai_set_config", { config });
+    } catch (error) {
+      // Never write a configuration that the runtime rejected. Reconcile the
+      // runtime to the same fallback that the UI will show before returning.
+      await invoke<void>("plugin:kuku-ai|ai_set_config", { config: defaults }).catch(() => {});
+      throw error;
+    }
+    try {
+      await savePluginSettings(AI_CHAT_SETTINGS_PLUGIN_ID, config, [...AI_CHAT_SECURE_KEYS]);
+    } catch (error) {
+      // The candidate reached the runtime but not durable storage. Restore the
+      // runtime before leaving the UI on the durable/default configuration.
+      await invoke<void>("plugin:kuku-ai|ai_set_config", { config: defaults });
+      throw error;
+    }
     applyConfigToState(config);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const defaults = createDefaultAiConfig();
     applyConfigToState(defaults);
     setChatState("config", "error", message);
   } finally {
@@ -755,8 +769,14 @@ async function saveSettingsDraft(): Promise<void> {
       roundLimit: currentConfig.roundLimit ?? DEFAULT_ROUND_LIMIT,
       proxyToolTimeoutMs: currentConfig.proxyToolTimeoutMs ?? DEFAULT_PROXY_TIMEOUT_MS,
     });
-    await savePluginSettings(AI_CHAT_SETTINGS_PLUGIN_ID, nextConfig, [...AI_CHAT_SECURE_KEYS]);
     await invoke<void>("plugin:kuku-ai|ai_set_config", { config: nextConfig });
+    try {
+      await savePluginSettings(AI_CHAT_SETTINGS_PLUGIN_ID, nextConfig, [...AI_CHAT_SECURE_KEYS]);
+    } catch (error) {
+      const previousConfig = normalizeAiConfig(currentConfig);
+      await invoke<void>("plugin:kuku-ai|ai_set_config", { config: previousConfig });
+      throw error;
+    }
     applyConfigToState(nextConfig);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

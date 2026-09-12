@@ -269,10 +269,12 @@ where
         let mut input = Box::pin(input);
         let mut saw_tool_calls = false;
         let mut yielded_finished = false;
+        let mut terminal_error = false;
 
         while let Some(item) = input.next().await {
             match item {
                 Err(error) => {
+                    terminal_error = true;
                     yield Err(map_completion_error(error));
                     break;
                 }
@@ -312,7 +314,7 @@ where
             }
         }
 
-        if !yielded_finished {
+        if !yielded_finished && !terminal_error {
             yield Ok(CompletionEvent::Finished {
                 finish_reason: if saw_tool_calls {
                     FinishReason::ToolCalls
@@ -449,6 +451,7 @@ mod tests {
     };
     use serde::Deserialize;
     use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
     use tokio::runtime::Builder;
     use tokio_util::bytes::Bytes;
     use uuid::Uuid;
@@ -487,6 +490,24 @@ mod tests {
         accepted: bool,
     }
 
+    #[derive(Debug, Deserialize)]
+    struct FingerprintFixture {
+        base_url: String,
+        model: String,
+        verifier_sha256: String,
+        api_key: Option<String>,
+        expected: String,
+    }
+
+    #[derive(Clone, Debug)]
+    struct FingerprintContext {
+        provided: Option<String>,
+        base_url: String,
+        model: String,
+        verifier_sha256: String,
+        api_key: Option<String>,
+    }
+
     fn runtime() -> tokio::runtime::Runtime {
         Builder::new_current_thread()
             .enable_all()
@@ -507,6 +528,55 @@ mod tests {
             access: ToolAccess::ReadOnly,
             source: ToolSource::Native,
         }
+    }
+
+    fn configuration_fingerprint(
+        base_url: &str,
+        model: &str,
+        verifier_sha256: &str,
+        api_key: Option<&str>,
+    ) -> Result<String, AiError> {
+        if verifier_sha256.len() != 64
+            || !verifier_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(AiError::InvalidArguments(
+                "live verifier sha256 must be 64 hexadecimal characters".to_string(),
+            ));
+        }
+        let key = normalize_api_key(api_key);
+        let endpoint = parse_endpoint(base_url, key.is_some())?;
+        let key_hash = key.map_or_else(
+            || "none".to_string(),
+            |value| format!("{:x}", Sha256::digest(value.as_bytes())),
+        );
+        let canonical = format!(
+            "kuku-live-gate/1\n{}\n{}\n{}\n{}\n",
+            endpoint.base,
+            model,
+            verifier_sha256.to_ascii_lowercase(),
+            key_hash
+        );
+        Ok(format!("{:x}", Sha256::digest(canonical.as_bytes())))
+    }
+
+    fn fingerprint_context_from_env() -> Result<FingerprintContext, AiError> {
+        let base_url = std::env::var("KUKU_TEST_OPENAI_BASE_URL").map_err(|_| {
+            AiError::InvalidArguments("KUKU_TEST_OPENAI_BASE_URL is required".to_string())
+        })?;
+        let model = std::env::var("KUKU_TEST_OPENAI_MODEL").map_err(|_| {
+            AiError::InvalidArguments("KUKU_TEST_OPENAI_MODEL is required".to_string())
+        })?;
+        let verifier_sha256 = std::env::var("KUKU_LIVE_VERIFIER_SHA256").map_err(|_| {
+            AiError::InvalidArguments("KUKU_LIVE_VERIFIER_SHA256 is required".to_string())
+        })?;
+        let api_key = normalize_api_key(std::env::var("KUKU_TEST_OPENAI_API_KEY").ok().as_deref());
+        Ok(FingerprintContext {
+            provided: std::env::var("KUKU_LIVE_CONFIG_FINGERPRINT").ok(),
+            base_url,
+            model,
+            verifier_sha256,
+            api_key,
+        })
     }
 
     fn turn_request(
@@ -736,6 +806,25 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_matches_shared_vectors() {
+        let fixtures: Vec<FingerprintFixture> = serde_json::from_str(include_str!(
+            "../../../../scripts/h4/fixtures/live_gate_fingerprint_vectors.json"
+        ))
+        .expect("parse live-gate fingerprint fixtures");
+        assert_eq!(fixtures.len(), 3);
+        for fixture in fixtures {
+            let observed = configuration_fingerprint(
+                &fixture.base_url,
+                &fixture.model,
+                &fixture.verifier_sha256,
+                fixture.api_key.as_deref(),
+            )
+            .expect("compute fixture fingerprint");
+            assert_eq!(observed, fixture.expected, "{}", fixture.base_url);
+        }
+    }
+
+    #[test]
     fn adapt_stream_synthesizes_finished_when_stream_ends_early() {
         let input = futures::stream::iter(vec![Ok(StreamedAssistantContent::Text::<
             openai::completion::streaming::StreamingCompletionResponse,
@@ -798,6 +887,26 @@ mod tests {
                 usage: Some(_)
             })
         ));
+    }
+
+    #[test]
+    fn adapt_stream_does_not_emit_finished_after_error() {
+        let expected =
+            CompletionError::ProviderError("terminal stream failure".to_string()).to_string();
+        let input = futures::stream::iter(vec![Err(CompletionError::ProviderError(
+            "terminal stream failure".to_string(),
+        ))]);
+        let events = collect_stream(adapt_stream(input));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            Err(AiError::ProviderError(message)) if message == &expected
+        ));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(CompletionEvent::Finished { .. })))
+        );
     }
 
     #[test]
@@ -1132,6 +1241,7 @@ mod tests {
         log_path: PathBuf,
         attempt: String,
         test_name: String,
+        fingerprint: Option<FingerprintContext>,
     }
 
     impl Default for CountedHttpClient {
@@ -1150,10 +1260,30 @@ mod tests {
                 });
             let attempt =
                 std::env::var("KUKU_LIVE_ATTEMPT").unwrap_or_else(|_| Uuid::new_v4().to_string());
-            Self::with_context(log_path, attempt, test_name.to_string())
+            let fingerprint = fingerprint_context_from_env()
+                .expect("live request counting requires fingerprint configuration");
+            Self::with_fingerprint_context(log_path, attempt, test_name.to_string(), fingerprint)
         }
 
         fn with_context(log_path: PathBuf, attempt: String, test_name: String) -> Self {
+            Self::build(log_path, attempt, test_name, None)
+        }
+
+        fn with_fingerprint_context(
+            log_path: PathBuf,
+            attempt: String,
+            test_name: String,
+            fingerprint: FingerprintContext,
+        ) -> Self {
+            Self::build(log_path, attempt, test_name, Some(fingerprint))
+        }
+
+        fn build(
+            log_path: PathBuf,
+            attempt: String,
+            test_name: String,
+            fingerprint: Option<FingerprintContext>,
+        ) -> Self {
             let inner = reqwest::Client::builder()
                 .retry(reqwest::retry::never())
                 .redirect(reqwest::redirect::Policy::none())
@@ -1164,6 +1294,29 @@ mod tests {
                 log_path,
                 attempt,
                 test_name,
+                fingerprint,
+            }
+        }
+
+        fn validated_fingerprint(&self) -> http_client::Result<String> {
+            let Some(context) = &self.fingerprint else {
+                return Ok("unit-test".to_string());
+            };
+            let computed = configuration_fingerprint(
+                &context.base_url,
+                &context.model,
+                &context.verifier_sha256,
+                context.api_key.as_deref(),
+            )
+            .map_err(|error| instance_error(error.to_string()))?;
+            match context.provided.as_deref() {
+                Some(provided) if provided == computed => Ok(computed),
+                Some(provided) => Err(instance_error(format!(
+                    "live configuration fingerprint mismatch: provided={provided} computed={computed}"
+                ))),
+                None => Err(instance_error(
+                    "KUKU_LIVE_CONFIG_FINGERPRINT is required before a live request".to_string(),
+                )),
             }
         }
 
@@ -1178,6 +1331,7 @@ mod tests {
                     request.uri().path()
                 )));
             };
+            let fingerprint = self.validated_fingerprint()?;
             let _guard = request_log_lock().lock().expect("request log lock");
             let contents = match fs::read_to_string(&self.log_path) {
                 Ok(contents) => contents,
@@ -1185,7 +1339,7 @@ mod tests {
                 Err(error) => return Err(instance_io_error(error)),
             };
             let (chat, models) = count_requests(&contents, None);
-            if (kind == "chat" && chat >= 6) || (kind == "models" && models >= 4) {
+            if (kind == "chat" && chat >= 3) || (kind == "models" && models >= 2) {
                 return Err(instance_error(format!(
                     "live request ceiling reached before {kind} send: chat={chat} models={models}"
                 )));
@@ -1197,9 +1351,10 @@ mod tests {
                 .map_err(instance_io_error)?;
             writeln!(
                 file,
-                "{} attempt={} {} {}",
+                "{} attempt={} config={} {} {}",
                 iso_timestamp(),
                 self.attempt,
+                fingerprint,
                 kind,
                 self.test_name
             )
@@ -1316,13 +1471,16 @@ mod tests {
         let mut models = 0;
         for line in contents.lines() {
             let fields = line.split_whitespace().collect::<Vec<_>>();
-            if fields.len() < 4 || !fields[1].starts_with("attempt=") {
+            if fields.len() != 5
+                || !fields[1].starts_with("attempt=")
+                || !fields[2].starts_with("config=")
+            {
                 continue;
             }
             if attempt.is_some_and(|attempt| fields[1] != format!("attempt={attempt}")) {
                 continue;
             }
-            match fields[2] {
+            match fields[3] {
                 "chat" => chat += 1,
                 "models" => models += 1,
                 _ => {}
@@ -1435,14 +1593,14 @@ mod tests {
 
         let ceiling_log = temp.join("ceiling.log");
         let mut ceiling_contents = String::new();
-        for index in 0..6 {
+        for index in 0..3 {
             ceiling_contents.push_str(&format!(
-                "2026-09-11T00:00:00Z attempt=prior chat prior-{index}\n"
+                "2026-09-11T00:00:00Z attempt=prior config=prior chat prior-{index}\n"
             ));
         }
-        for index in 0..4 {
+        for index in 0..2 {
             ceiling_contents.push_str(&format!(
-                "2026-09-11T00:00:00Z attempt=prior models prior-{index}\n"
+                "2026-09-11T00:00:00Z attempt=prior config=prior models prior-{index}\n"
             ));
         }
         fs::write(&ceiling_log, ceiling_contents).expect("seed ceiling log");
@@ -1460,7 +1618,7 @@ mod tests {
         assert!(matches!(
             model_result,
             Err(http_client::Error::Instance(error))
-                if error.to_string() == "live request ceiling reached before models send: chat=6 models=4"
+                if error.to_string() == "live request ceiling reached before models send: chat=3 models=2"
         ));
         let chat_request = http_client::Request::post("http://127.0.0.1:1/v1/chat/completions")
             .body(Vec::<u8>::new())
@@ -1469,12 +1627,57 @@ mod tests {
         assert!(matches!(
             chat_result,
             Err(http_client::Error::Instance(error))
-                if error.to_string() == "live request ceiling reached before chat send: chat=6 models=4"
+                if error.to_string() == "live request ceiling reached before chat send: chat=3 models=2"
         ));
         assert_eq!(
             count_requests(&fs::read_to_string(&ceiling_log).unwrap(), None),
-            (6, 4)
+            (3, 2)
         );
+
+        let fingerprint_log = temp.join("fingerprint.log");
+        let fingerprint_material = FingerprintContext {
+            provided: None,
+            base_url: "http://127.0.0.1:11434/v1".to_string(),
+            model: "qwen3.5:4b".to_string(),
+            verifier_sha256: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                .to_string(),
+            api_key: None,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fingerprint listener");
+        listener
+            .set_nonblocking(true)
+            .expect("make fingerprint listener nonblocking");
+        let address = listener.local_addr().expect("fingerprint address");
+        for (provided, expected_fragment) in [
+            (None, "KUKU_LIVE_CONFIG_FINGERPRINT is required"),
+            (Some("different".to_string()), "fingerprint mismatch"),
+        ] {
+            let client = CountedHttpClient::with_fingerprint_context(
+                fingerprint_log.clone(),
+                "fingerprint".to_string(),
+                "fingerprint".to_string(),
+                FingerprintContext {
+                    provided,
+                    ..fingerprint_material.clone()
+                },
+            );
+            let request = http_client::Request::get(format!("http://{address}/v1/models"))
+                .body(NoBody)
+                .expect("build fingerprint request");
+            let result: http_client::Result<http_client::Response<http_client::LazyBody<Vec<u8>>>> =
+                runtime().block_on(client.send(request));
+            assert!(matches!(
+                result,
+                Err(http_client::Error::Instance(error))
+                    if error.to_string().contains(expected_fragment)
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        assert!(!fingerprint_log.exists());
 
         let dropped_stream_log = temp.join("dropped-stream.log");
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind dropped-stream listener");
@@ -1545,6 +1748,57 @@ mod tests {
             (1, 0),
             "the concrete OpenAI adapter must not make a second send_streaming call"
         );
+    }
+
+    #[test]
+    fn refuses_send_on_missing_or_mismatched_fingerprint() {
+        let temp = std::env::temp_dir().join(format!("kuku-fingerprint-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp).expect("create fingerprint temp dir");
+        let log_path = temp.join("requests.log");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fingerprint listener");
+        listener
+            .set_nonblocking(true)
+            .expect("make fingerprint listener nonblocking");
+        let address = listener.local_addr().expect("fingerprint address");
+        let material = FingerprintContext {
+            provided: None,
+            base_url: "http://127.0.0.1:11434/v1".to_string(),
+            model: "qwen3.5:4b".to_string(),
+            verifier_sha256: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                .to_string(),
+            api_key: None,
+        };
+        for (provided, expected_fragment) in [
+            (None, "KUKU_LIVE_CONFIG_FINGERPRINT is required"),
+            (Some("different".to_string()), "fingerprint mismatch"),
+        ] {
+            let client = CountedHttpClient::with_fingerprint_context(
+                log_path.clone(),
+                "attempt".to_string(),
+                "fingerprint".to_string(),
+                FingerprintContext {
+                    provided,
+                    ..material.clone()
+                },
+            );
+            let request = http_client::Request::get(format!("http://{address}/v1/models"))
+                .body(NoBody)
+                .expect("build fingerprint request");
+            let result: http_client::Result<http_client::Response<http_client::LazyBody<Vec<u8>>>> =
+                runtime().block_on(client.send(request));
+            assert!(matches!(
+                result,
+                Err(http_client::Error::Instance(error))
+                    if error.to_string().contains(expected_fragment)
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        assert!(!log_path.exists());
+        fs::remove_dir_all(temp).expect("remove fingerprint temp dir");
     }
 
     fn live_settings() -> Option<(String, Option<String>, String)> {
@@ -1627,7 +1881,7 @@ mod tests {
             )
             .expect("build live backend");
             let first_messages = vec![user_message(
-                "Call list_files once. Do not answer without calling the tool.",
+                "Call list_files once, then reply with exactly the file name returned by the tool.",
             )];
             let first_events = backend
                 .stream_turn(turn_request(
@@ -1664,9 +1918,6 @@ mod tests {
                 tool_call_id: calls[0].tool_call_id.clone(),
                 provider_call_id: calls[0].provider_call_id.clone(),
             });
-            messages.push(user_message(
-                "Reply with exactly the file name from the tool result",
-            ));
             let second_events = backend
                 .stream_turn(turn_request(messages, Vec::new(), ToolChoice::Auto))
                 .await

@@ -1,0 +1,10 @@
+[
+  {
+    "canonical_path": "/private/tmp",
+    "expected_hex": "1ad19f0f5f82ef38730f2adfd8961311c575f1f80ac3b4636ed4911108d4c97d"
+  },
+  {
+    "canonical_path": "/Users/Shared",
+    "expected_hex": "dffefd631ce6e217748a33620ca3d55209eb482cf6e40c8a4e5cf02d67394414"
+  }
+]

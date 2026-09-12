@@ -1,34 +1,71 @@
 #!/usr/bin/env bash
+# ---
+# asset: kuku-verify-openai-provider
+# type: test-script
+# description: Run the exact three OpenAI-compatible live tests with a fingerprinted, fail-closed HTTP-attempt ledger.
+# owner: michael
+# status: active
+# ---
+
 set -euo pipefail
 
-if [[ -z "${KUKU_TEST_OPENAI_BASE_URL:-}" ]]; then
-  echo "KUKU_TEST_OPENAI_BASE_URL is required" >&2
+fail() {
+  printf 'live provider verification failed: %s\n' "$*" >&2
   exit 1
-fi
-if [[ -z "${KUKU_TEST_OPENAI_MODEL:-}" ]]; then
-  echo "KUKU_TEST_OPENAI_MODEL is required" >&2
-  exit 1
-fi
+}
+
+for required in KUKU_TEST_OPENAI_BASE_URL KUKU_TEST_OPENAI_MODEL KUKU_LIVE_REQUEST_LOG; do
+  [[ -n "${!required:-}" ]] || fail "${required} is required"
+done
+[[ ! -s "$KUKU_LIVE_REQUEST_LOG" ]] || fail "request log already contains data: ${KUKU_LIVE_REQUEST_LOG}"
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
-
-: "${KUKU_LIVE_REQUEST_LOG:=${TMPDIR:-/tmp}/kuku-ai-live-requests-${PPID}.log}"
-: "${KUKU_LIVE_RECEIPT:=${KUKU_LIVE_REQUEST_LOG}.receipt}"
-export KUKU_LIVE_REQUEST_LOG
 mkdir -p "$(dirname "$KUKU_LIVE_REQUEST_LOG")"
-touch "$KUKU_LIVE_REQUEST_LOG"
+: >"$KUKU_LIVE_REQUEST_LOG"
+: "${KUKU_LIVE_RECEIPT:=${KUKU_LIVE_REQUEST_LOG}.receipt.json}"
+export KUKU_LIVE_REQUEST_LOG KUKU_LIVE_RECEIPT
 
-readonly live_streams="live_streams_text_with_usage_identities"
-readonly live_tools="live_two_round_tool_call_replays_ids"
-readonly live_models="live_list_models_contains_the_configured_model_once"
-readonly live_prefix="provider::openai::tests::"
-readonly -a live_order=("$live_streams" "$live_models" "$live_tools")
+readonly live_streams=live_streams_text_with_usage_identities
+readonly live_tools=live_two_round_tool_call_replays_ids
+readonly live_models=live_list_models_contains_the_configured_model_once
+readonly live_prefix=provider::openai::tests::
+readonly -a live_order=("$live_streams" "$live_tools" "$live_models")
 
-fail() {
-  echo "live provider verification failed: $*" >&2
-  exit 1
-}
+KUKU_LIVE_VERIFIER_SHA256=$(shasum -a 256 "$repo_root/scripts/h4/verify_ai_provider.sh" | awk '{print $1}')
+export KUKU_LIVE_VERIFIER_SHA256
+
+KUKU_LIVE_CONFIG_FINGERPRINT=$(python3 - "$KUKU_LIVE_VERIFIER_SHA256" <<'PY'
+import hashlib
+import os
+import sys
+import urllib.parse
+
+raw = os.environ["KUKU_TEST_OPENAI_BASE_URL"].strip()
+parsed = urllib.parse.urlsplit(raw)
+if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+    raise SystemExit("invalid OpenAI base URL")
+if parsed.username or parsed.password or parsed.query or parsed.fragment:
+    raise SystemExit("OpenAI base URL must not contain userinfo, query, or fragment")
+host = parsed.hostname.lower()
+if ":" in host:
+    host = f"[{host}]"
+port = f":{parsed.port}" if parsed.port is not None else ""
+path = parsed.path.rstrip("/") or "/v1"
+base = f"{parsed.scheme.lower()}://{host}{port}{path}"
+key = os.environ.get("KUKU_TEST_OPENAI_API_KEY", "").strip()
+key_hash = hashlib.sha256(key.encode()).hexdigest() if key else "none"
+canonical = (
+    "kuku-live-gate/1\n"
+    f"{base}\n"
+    f"{os.environ['KUKU_TEST_OPENAI_MODEL']}\n"
+    f"{sys.argv[1].lower()}\n"
+    f"{key_hash}\n"
+)
+print(hashlib.sha256(canonical.encode()).hexdigest())
+PY
+) || fail "could not compute configuration fingerprint"
+export KUKU_LIVE_CONFIG_FINGERPRINT
 
 new_attempt() {
   uuidgen | tr '[:upper:]' '[:lower:]'
@@ -39,213 +76,138 @@ append_synced() {
 import os
 import sys
 
-path, line = sys.argv[1:]
-parent = os.path.dirname(path)
-if parent:
-    os.makedirs(parent, exist_ok=True)
-with open(path, "a", encoding="utf-8") as handle:
-    handle.write(line + "\n")
+with open(sys.argv[1], "a", encoding="utf-8") as handle:
+    handle.write(sys.argv[2] + "\n")
     handle.flush()
     os.fsync(handle.fileno())
 PY
 }
 
+validate_ledger() {
+  awk -v config="$KUKU_LIVE_CONFIG_FINGERPRINT" -v s="$live_streams" -v t="$live_tools" -v m="$live_models" '
+    function request_row() {
+      return NF == 5 && $1 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/ &&
+        $2 ~ /^attempt=[0-9A-Za-z._-]+$/ && $3 == "config=" config &&
+        ($4 == "chat" || $4 == "models") && $5 ~ /^[0-9A-Za-z._-]+$/
+    }
+    function probe_marker() {
+      return NF == 3 && $1 == "probe" && $2 ~ /^attempt=[0-9A-Za-z._-]+$/ && $3 == "config=" config
+    }
+    function completed_marker() {
+      return NF == 4 && $1 == "completed" && $2 ~ /^attempt=[0-9A-Za-z._-]+$/ &&
+        $3 == "config=" config && ($4 == s || $4 == t || $4 == m)
+    }
+    function receipt_marker() {
+      return NF == 6 && $1 == "receipt" && $2 == "config=" config && $3 == "chat=3" &&
+        $4 == "models=2" && $5 ~ /^attempts=[0-9A-Za-z,._-]+$/ && $6 ~ /^log_sha256=[0-9a-f]{64}$/
+    }
+    !(request_row() || probe_marker() || completed_marker() || receipt_marker()) { bad = 1 }
+    END { exit bad }
+  ' "$KUKU_LIVE_REQUEST_LOG" || fail "request log contains a row outside the exact marker syntax"
+}
+
 request_counts() {
-  awk '
-    NF >= 4 && $2 ~ /^attempt=/ && $3 == "chat" { chat += 1 }
-    NF >= 4 && $2 ~ /^attempt=/ && $3 == "models" { models += 1 }
-    END { printf "%d %d\n", chat + 0, models + 0 }
-  ' "$KUKU_LIVE_REQUEST_LOG" 2>/dev/null || printf '0 0\n'
+  awk '$3 ~ /^config=/ && $4 == "chat" { chat++ } $3 ~ /^config=/ && $4 == "models" { models++ } END { print chat + 0, models + 0 }' "$KUKU_LIVE_REQUEST_LOG"
 }
 
 attempt_counts() {
-  local attempt=$1
-  awk -v wanted="attempt=${attempt}" '
-    NF >= 4 && $2 == wanted && $3 == "chat" { chat += 1 }
-    NF >= 4 && $2 == wanted && $3 == "models" { models += 1 }
-    END { printf "%d %d\n", chat + 0, models + 0 }
-  ' "$KUKU_LIVE_REQUEST_LOG"
+  awk -v attempt="attempt=$1" '$2 == attempt && $4 == "chat" { chat++ } $2 == attempt && $4 == "models" { models++ } END { print chat + 0, models + 0 }' "$KUKU_LIVE_REQUEST_LOG"
 }
 
-completed_attempt() {
-  local name=$1
-  awk -v wanted="$name" '$1 == "completed" && $3 == wanted { sub(/^attempt=/, "", $2); print $2 }' "$KUKU_LIVE_REQUEST_LOG" 2>/dev/null
-}
-
-inventory_output=$(cargo test -p kuku-ai -- --list 2>&1) || {
+inventory_output=$(TMPDIR=/private/tmp cargo test -p kuku-ai -- --list 2>&1) || {
   printf '%s\n' "$inventory_output" >&2
   fail "could not inventory live tests"
 }
 inventory=()
 while IFS= read -r inventory_name; do
   inventory+=("$inventory_name")
-done < <(
-  printf '%s\n' "$inventory_output" |
-    awk '$2 == "test" && $1 ~ /live_/ { sub(/:$/, "", $1); print $1 }'
-)
-expected_inventory=(
-  "${live_prefix}${live_streams}"
-  "${live_prefix}${live_tools}"
-  "${live_prefix}${live_models}"
-)
+done < <(printf '%s\n' "$inventory_output" | awk '$2 == "test" && $1 ~ /live_/ { sub(/:$/, "", $1); print $1 }')
+expected_inventory=("${live_prefix}${live_streams}" "${live_prefix}${live_tools}" "${live_prefix}${live_models}")
 [[ ${#inventory[@]} -eq 3 ]] || fail "inventory must contain exactly three live_ tests; observed ${#inventory[@]}"
 for expected in "${expected_inventory[@]}"; do
-  count=0
-  for observed in "${inventory[@]}"; do
-    [[ "$observed" == "$expected" ]] && count=$((count + 1))
-  done
+  count=$(printf '%s\n' "${inventory[@]}" | awk -v wanted="$expected" '$0 == wanted { count++ } END { print count + 0 }')
   [[ $count -eq 1 ]] || fail "inventory must contain ${expected} exactly once; observed ${count}"
 done
-for observed in "${inventory[@]}"; do
-  allowed=0
-  for expected in "${expected_inventory[@]}"; do
-    [[ "$observed" == "$expected" ]] && allowed=1
-  done
-  [[ $allowed -eq 1 ]] || fail "unexpected live_ test in inventory: ${observed}"
-done
 
-had_prior=0
-if [[ -s "$KUKU_LIVE_REQUEST_LOG" ]]; then
-  had_prior=1
-  [[ "${RELEASE_H4_RENEW_LIVE_GATE:-}" == "1" ]] ||
-    fail "live gate incomplete; set RELEASE_H4_RENEW_LIVE_GATE=1 to authorize a new paid run"
+probe_attempt=$(new_attempt)
+read -r chat_count models_count <<<"$(request_counts)"
+[[ $chat_count -le 3 && $models_count -lt 2 ]] || fail "live request ceiling reached before models probe: chat=${chat_count} models=${models_count}"
+append_synced "$(date -u +%Y-%m-%dT%H:%M:%SZ) attempt=${probe_attempt} config=${KUKU_LIVE_CONFIG_FINGERPRINT} models verifier_probe"
+validate_ledger
+probe_base=$(python3 - <<'PY'
+import os
+print(os.environ["KUKU_TEST_OPENAI_BASE_URL"].strip().rstrip("/"))
+PY
+)
+curl_args=(-sS --fail --output /dev/null "${probe_base}/models")
+if [[ -n "${KUKU_TEST_OPENAI_API_KEY:-}" ]]; then
+  curl_args=(-sS --fail --output /dev/null -H "Authorization: Bearer ${KUKU_TEST_OPENAI_API_KEY}" "${probe_base}/models")
 fi
+curl "${curl_args[@]}" || fail "models probe failed"
+append_synced "probe attempt=${probe_attempt} config=${KUKU_LIVE_CONFIG_FINGERPRINT}"
 
-probe_markers=$(awk '$1 == "probe" && $2 ~ /^attempt=/ { count += 1 } END { print count + 0 }' "$KUKU_LIVE_REQUEST_LOG" 2>/dev/null || printf '0')
-if [[ $probe_markers -gt 1 ]]; then
-  fail "expected at most one completed probe; observed ${probe_markers}"
-fi
-if [[ $probe_markers -eq 0 ]]; then
-  read -r chat_count models_count <<<"$(request_counts)"
-  [[ $models_count -lt 4 ]] || fail "live request ceiling reached before models probe: chat=${chat_count} models=${models_count}"
-  probe_attempt=$(new_attempt)
-  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  append_synced "${timestamp} attempt=${probe_attempt} models verifier_probe"
-  probe_base=$KUKU_TEST_OPENAI_BASE_URL
-  while [[ "$probe_base" == */ ]]; do
-    probe_base=${probe_base%/}
-  done
-  curl_args=(-sS --fail --output /dev/null "${probe_base}/models")
-  if [[ -n "${KUKU_TEST_OPENAI_API_KEY:-}" ]]; then
-    curl_args=(-sS --fail --output /dev/null -H "Authorization: Bearer ${KUKU_TEST_OPENAI_API_KEY}" "${probe_base}/models")
-  fi
-  curl "${curl_args[@]}" || fail "models probe failed"
-  append_synced "probe attempt=${probe_attempt}"
-fi
-
+attempt_ids=("$probe_attempt")
 for name in "${live_order[@]}"; do
-  existing_attempts=()
-  while IFS= read -r existing_attempt; do
-    existing_attempts+=("$existing_attempt")
-  done < <(completed_attempt "$name")
-  if [[ ${#existing_attempts[@]} -gt 1 ]]; then
-    fail "test ${name} has duplicate completed markers"
-  fi
-  if [[ ${#existing_attempts[@]} -eq 1 ]]; then
-    continue
-  fi
-
   attempt=$(new_attempt)
+  attempt_ids+=("$attempt")
   fq_name="${live_prefix}${name}"
   set +e
-  test_output=$(KUKU_LIVE_ATTEMPT="$attempt" cargo test -p kuku-ai "$fq_name" -- --exact --nocapture 2>&1)
+  test_output=$(KUKU_LIVE_ATTEMPT="$attempt" TMPDIR=/private/tmp cargo test -p kuku-ai "$fq_name" -- --exact --nocapture 2>&1)
   test_status=$?
   set -e
   printf '%s\n' "$test_output"
   [[ $test_status -eq 0 ]] || fail "${name} exited ${test_status}"
   [[ "$test_output" != *"skipped: KUKU_TEST_OPENAI_BASE_URL unset"* ]] || fail "${name} was skipped"
-
-  observed_live_tests=()
-  while IFS= read -r observed_live_test; do
-    observed_live_tests+=("$observed_live_test")
-  done < <(
-    printf '%s\n' "$test_output" |
-      awk '$1 == "test" && $2 ~ /live_/ { print $2 }'
-  )
-  [[ ${#observed_live_tests[@]} -eq 1 ]] || fail "${name} must report exactly one live_ test; observed ${#observed_live_tests[@]}"
-  [[ "${observed_live_tests[0]}" == "$fq_name" ]] || fail "${name} reported unexpected live_ test ${observed_live_tests[0]}"
-  ok_count=$(printf '%s\n' "$test_output" | awk -v wanted="$fq_name" '$1 == "test" && $2 == wanted && $3 == "..." && $4 == "ok" { count += 1 } END { print count + 0 }')
+  ok_count=$(printf '%s\n' "$test_output" | awk -v wanted="$fq_name" '$1 == "test" && $2 == wanted && $3 == "..." && $4 == "ok" { count++ } END { print count + 0 }')
   [[ $ok_count -eq 1 ]] || fail "${name} must report exactly one ok result; observed ${ok_count}"
-
+  observed_count=$(printf '%s\n' "$test_output" | awk '$1 == "test" && $2 ~ /live_/ { count++ } END { print count + 0 }')
+  [[ $observed_count -eq 1 ]] || fail "${name} must report exactly one live_ test; observed ${observed_count}"
   case "$name" in
     "$live_streams") expected_chat=1; expected_models=0 ;;
     "$live_tools") expected_chat=2; expected_models=0 ;;
     "$live_models") expected_chat=0; expected_models=1 ;;
-    *) fail "internal error: unknown live test ${name}" ;;
+    *) fail "unexpected live test ${name}" ;;
   esac
   machine_line="LIVE_REQUESTS attempt=${attempt} test=${name} chat=${expected_chat} models=${expected_models}"
-  machine_count=$(printf '%s\n' "$test_output" | awk -v wanted="$machine_line" '$0 == wanted { count += 1 } END { print count + 0 }')
-  [[ $machine_count -eq 1 ]] || fail "${name} must print its attempt-scoped LIVE_REQUESTS line exactly once"
+  [[ $(printf '%s\n' "$test_output" | awk -v wanted="$machine_line" '$0 == wanted { count++ } END { print count + 0 }') -eq 1 ]] ||
+    fail "${name} must print its attempt-scoped LIVE_REQUESTS line exactly once"
+  validate_ledger
   read -r attempt_chat attempt_models <<<"$(attempt_counts "$attempt")"
   [[ $attempt_chat -eq $expected_chat && $attempt_models -eq $expected_models ]] ||
     fail "${name} attempt ${attempt} request delta was chat=${attempt_chat} models=${attempt_models}; expected chat=${expected_chat} models=${expected_models}"
-  append_synced "completed attempt=${attempt} ${name}"
+  append_synced "completed attempt=${attempt} config=${KUKU_LIVE_CONFIG_FINGERPRINT} ${name}"
 done
 
-probe_attempt=$(awk '$1 == "probe" && $2 ~ /^attempt=/ { sub(/^attempt=/, "", $2); print $2 }' "$KUKU_LIVE_REQUEST_LOG")
-read -r probe_chat probe_models <<<"$(attempt_counts "$probe_attempt")"
-[[ $probe_chat -eq 0 && $probe_models -eq 1 ]] || fail "probe attempt ${probe_attempt} request delta was chat=${probe_chat} models=${probe_models}; expected chat=0 models=1"
-
-for name in "${live_order[@]}"; do
-  attempts=()
-  while IFS= read -r completed; do
-    attempts+=("$completed")
-  done < <(completed_attempt "$name")
-  [[ ${#attempts[@]} -eq 1 ]] || fail "test ${name} must have exactly one completed marker"
-  case "$name" in
-    "$live_streams") expected_chat=1; expected_models=0 ;;
-    "$live_tools") expected_chat=2; expected_models=0 ;;
-    "$live_models") expected_chat=0; expected_models=1 ;;
-  esac
-  read -r attempt_chat attempt_models <<<"$(attempt_counts "${attempts[0]}")"
-  [[ $attempt_chat -eq $expected_chat && $attempt_models -eq $expected_models ]] ||
-    fail "completed ${name} attempt ${attempts[0]} has chat=${attempt_chat} models=${attempt_models}; expected chat=${expected_chat} models=${expected_models}"
-done
-
+validate_ledger
 read -r chat_count models_count <<<"$(request_counts)"
-if [[ $had_prior -eq 0 ]]; then
-  [[ $chat_count -eq 3 && $models_count -eq 2 ]] ||
-    fail "clean live gate totals must be chat=3 models=2; observed chat=${chat_count} models=${models_count}"
-else
-  [[ $chat_count -le 6 && $models_count -le 4 ]] ||
-    fail "renewed live gate exceeds ceiling: chat=${chat_count} models=${models_count}"
-fi
+[[ $chat_count -eq 3 && $models_count -eq 2 ]] || fail "clean live gate totals must be chat=3 models=2; observed chat=${chat_count} models=${models_count}"
+attempt_csv=$(IFS=,; printf '%s' "${attempt_ids[*]}")
+log_sha256=$(shasum -a 256 "$KUKU_LIVE_REQUEST_LOG" | awk '{print $1}')
+append_synced "receipt config=${KUKU_LIVE_CONFIG_FINGERPRINT} chat=3 models=2 attempts=${attempt_csv} log_sha256=${log_sha256}"
+validate_ledger
 
-attempt_ids=$(awk '
-  {
-    for (field_number = 1; field_number <= NF; field_number += 1) {
-      if ($field_number ~ /^attempt=/) {
-        value = $field_number
-        sub(/^attempt=/, "", value)
-        if (!seen[value]++) {
-          ordered[++count] = value
-        }
-      }
-    }
-  }
-  END {
-    separator = ""
-    for (j = 1; j <= count; j += 1) {
-      printf "%s%s", separator, ordered[j]
-      separator = ","
-    }
-    printf "\n"
-  }
-' "$KUKU_LIVE_REQUEST_LOG")
-receipt="LIVE_GATE_RECEIPT chat=${chat_count} models=${models_count} attempts=${attempt_ids}"
-python3 - "$KUKU_LIVE_RECEIPT" "$receipt" <<'PY'
+python3 - "$KUKU_LIVE_RECEIPT" "$KUKU_LIVE_CONFIG_FINGERPRINT" "$attempt_csv" "$log_sha256" <<'PY'
+import datetime
+import json
 import os
 import sys
 
-path, receipt = sys.argv[1:]
-parent = os.path.dirname(path)
-if parent:
-    os.makedirs(parent, exist_ok=True)
+path, fingerprint, attempts, log_sha256 = sys.argv[1:]
 temporary = path + ".tmp"
+payload = {
+    "fingerprint": fingerprint,
+    "chat": 3,
+    "models": 2,
+    "attempts": attempts.split(","),
+    "log_sha256": log_sha256,
+    "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
 with open(temporary, "w", encoding="utf-8") as handle:
-    handle.write(receipt + "\n")
+    json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
     handle.flush()
     os.fsync(handle.fileno())
 os.replace(temporary, path)
 PY
-printf '%s\n' "$receipt"
+
+printf 'LIVE_GATE_RECEIPT chat=3 models=2 attempts=%s\n' "$attempt_csv"

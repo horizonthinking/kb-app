@@ -1180,8 +1180,19 @@ pub(crate) async fn gate_and_apply(
     cancel: &CancellationToken,
     pending: PendingApproval,
 ) -> Result<(String, bool), AiError> {
+    struct RestoreStreaming<'a>(&'a SessionRuntime);
+
+    impl Drop for RestoreStreaming<'_> {
+        fn drop(&mut self) {
+            self.0.set_status(SessionStatus::Streaming);
+        }
+    }
+
     let mutation_operations = pending.plan.operations.clone();
     let approval_rx = session.begin_awaiting_approval(pending.call_id.clone())?;
+    // Every exit after entering AwaitingApproval returns the live run to Streaming.
+    // This includes a dropped approval sender, an unavailable host, and an apply error.
+    let _restore_streaming = RestoreStreaming(session);
     sink.pending_approval(
         &session.id,
         &pending.call_id,
@@ -1200,7 +1211,6 @@ pub(crate) async fn gate_and_apply(
     };
 
     if matches!(decision, ApprovalDecision::Reject) {
-        session.set_status(SessionStatus::Streaming);
         return Ok(("Rejected by user".to_string(), true));
     }
 
@@ -1217,7 +1227,6 @@ pub(crate) async fn gate_and_apply(
         MutationApplyResult::Conflict { .. } => {}
     }
     let output = describe_apply_result(&apply_result);
-    session.set_status(SessionStatus::Streaming);
     if cancel.is_cancelled() {
         return Err(AiError::Cancelled);
     }
@@ -2273,6 +2282,80 @@ mod tests {
     }
 
     #[test]
+    fn gate_and_apply_preserves_approval_semantics_absent_host_restores_streaming() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let sink = RecordingSink::default();
+                let session = Arc::new(SessionRuntime::new(ChatMode::Agent));
+                let cancel = session.start_run().expect("start run");
+                let resolver = session.clone();
+                tokio::spawn(async move {
+                    wait_for_status(&resolver, SessionStatus::AwaitingApproval).await;
+                    resolver.resolve_approval("call-1", true).unwrap();
+                });
+                let host_resolutions = AtomicUsize::new(0);
+                let result = gate_and_apply(
+                    &sink,
+                    || {
+                        host_resolutions.fetch_add(1, Ordering::SeqCst);
+                        None
+                    },
+                    &session,
+                    &cancel,
+                    pending(mutation_plan("new")),
+                )
+                .await;
+                assert!(matches!(result, Err(AiError::HostUnavailable)));
+                assert_eq!(host_resolutions.load(Ordering::SeqCst), 1);
+                assert_eq!(session.status(), SessionStatus::Streaming);
+                assert!(matches!(
+                    session.resolve_approval("call-1", true),
+                    Err(AiError::ApprovalNotFound)
+                ));
+            });
+    }
+
+    #[test]
+    fn gate_and_apply_preserves_approval_semantics_apply_error_restores_streaming() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let sink = RecordingSink::default();
+                let session = Arc::new(SessionRuntime::new(ChatMode::Agent));
+                let cancel = session.start_run().expect("start run");
+                let resolver = session.clone();
+                tokio::spawn(async move {
+                    wait_for_status(&resolver, SessionStatus::AwaitingApproval).await;
+                    resolver.resolve_approval("call-1", true).unwrap();
+                });
+                let (calls, host) = fake_host(Err(AiError::State("host failed".to_string())));
+                let result = gate_and_apply(
+                    &sink,
+                    || Some(host),
+                    &session,
+                    &cancel,
+                    pending(mutation_plan("new")),
+                )
+                .await;
+                assert!(matches!(
+                    result,
+                    Err(AiError::State(message)) if message == "host failed"
+                ));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert_eq!(session.status(), SessionStatus::Streaming);
+                assert!(matches!(
+                    session.resolve_approval("call-1", true),
+                    Err(AiError::ApprovalNotFound)
+                ));
+            });
+    }
+
+    #[test]
     fn gate_and_apply_preserves_approval_semantics_sender_dropped_is_approval_not_found() {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2300,6 +2383,11 @@ mod tests {
                 .await
                 .expect("sender-drop case must not hang");
                 assert!(matches!(result, Err(AiError::ApprovalNotFound)));
+                assert_eq!(session.status(), SessionStatus::Streaming);
+                assert!(matches!(
+                    session.resolve_approval("call-1", true),
+                    Err(AiError::ApprovalNotFound)
+                ));
             });
     }
 

@@ -100,3 +100,14 @@ Kuku 서버는 Go + Postgres 기반이며 Docker Compose 구성을 제공합니�
 ## 릴리즈 메모
 
 웹사이트와 updater 릴리즈 메타데이터는 `apps/web/src/config/prod_release.ts`에 있고, 데스크톱 번들 버전은 `apps/desktop/src-tauri/tauri.conf.json`에 있습니다.
+
+AI 설정은 OpenAI Chat Completions 호환 엔드포인트도 지원합니다. 로컬 Ollama에는 기본 URL `http://127.0.0.1:11434/v1`을 사용하고 API 키를 비운 뒤 설치된 로컬 모델을 선택합니다. 프로덕션 어댑터 검증 명령은 다음과 같습니다.
+
+```bash
+KUKU_TEST_OPENAI_BASE_URL=http://127.0.0.1:11434/v1 \
+KUKU_TEST_OPENAI_MODEL=qwen3.5:4b \
+KUKU_LIVE_REQUEST_LOG=/private/tmp/kuku-live-provider.log \
+scripts/h4/verify_ai_provider.sh
+```
+
+H4 포크의 릴리즈 메타데이터는 `apps/desktop/src-tauri/tauri.h4.conf.json`에 별도로 있으며 단일 릴리즈 진입점은 `scripts/h4/release_h4.sh`입니다. 이는 업스트림 웹사이트 및 updater 메타데이터와 독립적입니다. H4 빌드는 앱 자체 updater를 비활성화하고 Homebrew 릴리즈로만 업데이트합니다.

@@ -83,7 +83,7 @@ describe("ai_chat chat_store config", () => {
       pluginId: "ai-chat",
       secureKeys: ["apiKey", "openaiApiKey"],
     });
-    expect(mockInvoke).toHaveBeenNthCalledWith(3, "plugin:kuku-ai|ai_set_config", {
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "plugin:kuku-ai|ai_set_config", {
       config: expect.objectContaining({
         provider: "openai",
         apiKey: null,
@@ -108,7 +108,7 @@ describe("ai_chat chat_store config", () => {
     });
     await chat.saveSettingsDraft();
 
-    expect(mockInvoke).toHaveBeenNthCalledWith(1, "plugin_save_settings_with_secrets", {
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "plugin_save_settings_with_secrets", {
       pluginId: "ai-chat",
       settings: expect.objectContaining({
         provider: "openai",
@@ -119,7 +119,7 @@ describe("ai_chat chat_store config", () => {
       }),
       secureKeys: ["apiKey", "openaiApiKey"],
     });
-    expect(mockInvoke).toHaveBeenNthCalledWith(2, "plugin:kuku-ai|ai_set_config", {
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "plugin:kuku-ai|ai_set_config", {
       config: expect.objectContaining({
         provider: "openai",
         apiKey: null,
@@ -127,6 +127,118 @@ describe("ai_chat chat_store config", () => {
         model: "gpt-5-nano",
       }),
     });
+  });
+
+  it("saveSettingsDraft rolls back persisted settings when ai_set_config rejects", async () => {
+    const persistedBefore = {
+      provider: "remote",
+      apiKey: null,
+      openaiApiKey: null,
+      openaiBaseUrl: "http://127.0.0.1:11434/v1",
+      openaiModel: null,
+      model: "default",
+      serverUrl: "https://api.kuku.mom",
+      roundLimit: 16,
+      proxyToolTimeoutMs: 30_000,
+    };
+    const persistedWrites: unknown[] = [];
+    mockInvoke.mockImplementation(async (command: string, payload: Record<string, unknown>) => {
+      if (command === "plugin_get_settings_with_secrets") return persistedBefore;
+      if (command === "plugin:kuku-ai|ai_set_config") {
+        const config = payload.config as { provider?: string };
+        if (config.provider === "openai") throw new Error("invalid endpoint");
+        return undefined;
+      }
+      if (command === "plugin_save_settings_with_secrets") {
+        persistedWrites.push(payload.settings);
+        return undefined;
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const chat = await loadChatStoreModule();
+    await chat.loadConfig();
+    persistedWrites.length = 0;
+    chat.setSettingsDraft({
+      provider: "openai",
+      openaiBaseUrl: "http://public.example/v1",
+      openaiModel: "bad-model",
+    });
+    await chat.saveSettingsDraft();
+
+    expect(persistedWrites).toEqual([]);
+    expect(chat.chatState.config.rawConfig).toMatchObject({ provider: "remote" });
+    expect(chat.chatState.config.error).toBe("invalid endpoint");
+
+    mockInvoke.mockReset();
+    mockInvoke
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("disk full"))
+      .mockResolvedValueOnce(undefined);
+    chat.setSettingsDraft({ provider: "gemini", apiKey: "key-G" });
+    await chat.saveSettingsDraft();
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "plugin:kuku-ai|ai_set_config", {
+      config: expect.objectContaining({ provider: "gemini", apiKey: "key-G" }),
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "plugin_save_settings_with_secrets", {
+      pluginId: "ai-chat",
+      settings: expect.objectContaining({ provider: "gemini", apiKey: "key-G" }),
+      secureKeys: ["apiKey", "openaiApiKey"],
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(3, "plugin:kuku-ai|ai_set_config", {
+      config: expect.objectContaining({ provider: "remote" }),
+    });
+    expect(chat.chatState.config.rawConfig).toMatchObject({ provider: "remote" });
+    expect(chat.chatState.config.error).toBe("disk full");
+  });
+
+  it("loadConfig does not re-persist an invalid configuration and recovers", async () => {
+    const persistedWrites: unknown[] = [];
+    let rejectInvalid = true;
+    mockInvoke.mockImplementation(async (command: string, payload: Record<string, unknown>) => {
+      if (command === "plugin_get_settings_with_secrets") {
+        return {
+          provider: "openai",
+          openaiBaseUrl: "http://public.example/v1",
+          openaiModel: "bad-model",
+        };
+      }
+      if (command === "plugin:kuku-ai|ai_set_config") {
+        const config = payload.config as { provider?: string };
+        if (rejectInvalid && config.provider === "openai") throw new Error("invalid endpoint");
+        return undefined;
+      }
+      if (command === "plugin_save_settings_with_secrets") {
+        persistedWrites.push(payload.settings);
+        return undefined;
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const chat = await loadChatStoreModule();
+    await chat.loadConfig();
+
+    expect(persistedWrites).toEqual([]);
+    expect(chat.chatState.config.provider).toBe("remote");
+    expect(chat.chatState.config.error).toBe("invalid endpoint");
+
+    rejectInvalid = false;
+    chat.setSettingsDraft({
+      provider: "openai",
+      openaiBaseUrl: "http://127.0.0.1:11434/v1",
+      openaiModel: "qwen3.5:4b",
+    });
+    await chat.saveSettingsDraft();
+
+    expect(persistedWrites).toHaveLength(1);
+    expect(persistedWrites[0]).toMatchObject({
+      provider: "openai",
+      openaiBaseUrl: "http://127.0.0.1:11434/v1",
+      openaiModel: "qwen3.5:4b",
+    });
+    expect(chat.chatState.config.provider).toBe("openai");
+    expect(chat.chatState.config.error).toBeNull();
   });
 
   it("clearPersistedConfig clears both secure keys", async () => {
@@ -226,7 +338,7 @@ describe("ai_chat chat_store config", () => {
     await chat.saveSettingsDraft();
     await chat.switchProviderAndSave("remote");
 
-    expect(mockInvoke).toHaveBeenLastCalledWith("plugin:kuku-ai|ai_set_config", {
+    expect(mockInvoke).toHaveBeenCalledWith("plugin:kuku-ai|ai_set_config", {
       config: expect.objectContaining({
         provider: "remote",
         openaiApiKey: "key-A",
@@ -258,7 +370,7 @@ describe("ai_chat chat_store config", () => {
     });
     chat.setSettingsDraft({ openaiModel: chat.chatState.config.modelSuggestions[0] });
     await chat.saveSettingsDraft();
-    expect(mockInvoke).toHaveBeenLastCalledWith("plugin:kuku-ai|ai_set_config", {
+    expect(mockInvoke).toHaveBeenCalledWith("plugin:kuku-ai|ai_set_config", {
       config: expect.objectContaining({ model: "qwen3.5:4b" }),
     });
   });
