@@ -208,16 +208,26 @@ export const JA_MESSAGES = {
     "を押すと、このキーをチャットで使えるようになります。",
   "settings.plugin.ai_chat.guide.title": "クイックガイド",
   "settings.plugin.ai_chat.guide.connection_label": "接続:",
-  "settings.plugin.ai_chat.guide.connection_before_link":
-    "「Kuku」は現在ログイン中のアカウントを使います。Kukuアカウントを使っているならこれが最も簡単です。1回ログインすれば通常このページを調整する必要はありません。「My Gemini API key」は Google",
-  "settings.plugin.ai_chat.guide.connection_after_link":
-    "で発行した個人キー向けです（無料枠でも試せます）。",
   "settings.plugin.ai_chat.guide.save_label": "保存",
-  "settings.plugin.ai_chat.guide.save_text":
-    "は変更のたびに押してください。成功表示が出れば準備完了です。",
   "settings.plugin.ai_chat.guide.open_chat_label": "チャットを開く:",
-  "settings.plugin.ai_chat.guide.open_chat_text":
-    "右サイドバーのタブまたはコマンドでパネルを開き、下部入力欄に入力します。",
+  "settings.plugin.ai_chat.guide.gemini.connection":
+    "Google AI Studio で個人用 API キーを作成し、下の欄に貼り付けます。",
+  "settings.plugin.ai_chat.guide.gemini.save":
+    "キーを変更したら保存し、この端末のチャットで使えるようにします。",
+  "settings.plugin.ai_chat.guide.gemini.open_chat":
+    "右サイドバーを開き、Gemini にメッセージを送信します。",
+  "settings.plugin.ai_chat.guide.openai.connection":
+    "ストリーミング対応の Chat Completions ベース URL を設定します。OpenAI と Ollama はリリース時に検証済みです。LM Studio、mlx_lm.server、OpenRouter なども動作が見込まれます。",
+  "settings.plugin.ai_chat.guide.openai.save":
+    "サーバーが対応していればモデル一覧を読み込み、モデルを選択して接続を保存します。",
+  "settings.plugin.ai_chat.guide.openai.open_chat":
+    "右サイドバーを開き、選択した互換モデルにメッセージを送信します。",
+  "settings.plugin.ai_chat.guide.remote.connection":
+    "Kuku アカウントにログインし、AI チャットを許可します。",
+  "settings.plugin.ai_chat.guide.remote.save":
+    "Kuku を選んで保存します。ローカルのプロバイダーキーは不要です。",
+  "settings.plugin.ai_chat.guide.remote.open_chat":
+    "右サイドバーを開き、Kuku セッション経由でチャットします。",
   "settings.plugin.ai_chat.account_banner.title": "Kuku アカウントがありますか？",
   "settings.plugin.ai_chat.account_banner.description":
     "ログインして「Kuku (signed in)」を選ぶとすぐ使えます。この画面は接続方式・キー選択・保存のみです。ログイン、セッション、AI 権限はアカウントで管理します。",
@@ -227,11 +237,21 @@ export const JA_MESSAGES = {
     "ログイン済みなら Kuku から始めるのがおすすめです。必要な場合のみ個人キーに切り替えてください。",
   "settings.plugin.ai_chat.connection.option_remote": "Kuku (signed in) - かんたん",
   "settings.plugin.ai_chat.connection.option_gemini": "My Gemini API key",
+  "settings.plugin.ai_chat.connection.option_openai": "OpenAI 互換サーバー",
   "settings.plugin.ai_chat.model.label": "モデル",
   "settings.plugin.ai_chat.model.remote_description":
     "現在は Gemini 3.1 Flash Lite を使用しています。アプリの更新により変わることがあります。",
   "settings.plugin.ai_chat.model.gemini_description":
     "個人キー利用時も現在は Gemini 3.1 Flash Lite を使用しています。アプリの更新により変わることがあります。",
+  "settings.plugin.ai_chat.model.openai_description":
+    "互換サーバーが返すモデル ID を正確に入力してください。",
+  "settings.plugin.ai_chat.model.openai_placeholder": "gpt-5-nano または qwen3.5:4b",
+  "settings.plugin.ai_chat.models.load": "モデルを読み込む",
+  "settings.plugin.ai_chat.models.loading": "モデルを読み込み中…",
+  "settings.plugin.ai_chat.openai_base_url.label": "ベース URL",
+  "settings.plugin.ai_chat.openai_base_url.description":
+    "キーがある場合は必ず HTTPS を使用します。キーなしの HTTP はローカルまたはプライベートホストでのみ使用できます。",
+  "settings.plugin.ai_chat.openai_base_url.placeholder": "https://api.openai.com/v1",
   "settings.plugin.ai_chat.remote_banner.title": "Kuku モード利用中",
   "settings.plugin.ai_chat.remote_banner.description":
     "この画面に API キーは不要です。Kuku / Google ログインで認証済みです。チャット許可エラーが出る場合は設定のアカウントを確認してください。",
@@ -242,12 +262,21 @@ export const JA_MESSAGES = {
     "キーを作成して一度だけコピーします。全体の値は再表示できないことがあります。",
   "settings.plugin.ai_chat.gemini_banner.step3":
     "下に貼り付けて保存すると、この端末のアプリに保存されます。",
-  "settings.plugin.ai_chat.api_key.label": "Gemini API キー",
+  "settings.plugin.ai_chat.api_key.label_gemini": "Gemini API キー",
+  "settings.plugin.ai_chat.api_key.label_openai": "OpenAI 互換 API キー",
   "settings.plugin.ai_chat.api_key.description":
     "初期状態では非表示です。目のアイコンで全体が貼れているか確認できます。",
   "settings.plugin.ai_chat.api_key.placeholder": "キーをここに貼り付け",
   "settings.plugin.ai_chat.api_key.hide": "キーを隠す",
   "settings.plugin.ai_chat.api_key.show": "キーを表示",
+  "settings.plugin.ai_chat.api_key.requirement_required": "必須",
+  "settings.plugin.ai_chat.api_key.requirement_optional": "任意",
+  "settings.plugin.ai_chat.openai_banner.key_title": "API キーが必要です",
+  "settings.plugin.ai_chat.openai_banner.key_description":
+    "このホストに接続するには API キーが必要です。",
+  "settings.plugin.ai_chat.openai_banner.model_title": "モデルが必要です",
+  "settings.plugin.ai_chat.openai_banner.model_description":
+    "モデル ID を入力または読み込み、設定を保存してください。",
   "settings.plugin.ai_chat.tools.title": "AI ができること",
   "settings.plugin.ai_chat.tools.description":
     "AI が代わりに使えるツール一覧です。ノート検索、ファイル読取/編集などを行い、破壊的な操作前には必要に応じて確認します。",
@@ -458,6 +487,8 @@ export const JA_MESSAGES = {
   "settings.about.version.unknown": "不明",
   "settings.about.metric.version": "バージョン",
   "settings.about.metric.license": "ライセンス",
+  "settings.about.h4_build": "H4 ビルド {{label}}",
+  "settings.about.updates_via_homebrew": "Homebrew 経由で更新",
 
   "app.title.vault_fallback": "ボルト",
   "app.action.toggle_left_panel": "左パネルを切り替え",
@@ -615,7 +646,8 @@ export const JA_MESSAGES = {
   "chat.thinking": "考え中",
   "chat.attachment.selected_text": "選択テキスト",
   "chat.panel.setup.title": "AIチャットを設定",
-  "chat.panel.setup.description": "Gemini APIキーを使うか、Kukuアカウントでログインしてください。",
+  "chat.panel.setup.description":
+    "チャットを始める前に、選択したプロバイダーの設定を完了してください。",
   "chat.panel.setup.opening": "開いています...",
   "chat.panel.setup.sign_in": "Kuku でログイン",
   "chat.panel.setup.remote_hint":
@@ -623,7 +655,11 @@ export const JA_MESSAGES = {
   "chat.panel.setup.or": "または",
   "chat.panel.setup.open_settings": "設定を開く",
   "chat.panel.setup.byok_hint":
-    "または設定で Gemini キーを追加して、この端末の BYOK として利用できます。",
+    "設定で Gemini または OpenAI 互換サーバーを構成することもできます。",
+  "chat.panel.setup.prompt_remote": "Kuku アカウントでログインし、AI チャットを許可してください。",
+  "chat.panel.setup.prompt_gemini": "設定で Gemini API キーを追加して保存してください。",
+  "chat.panel.setup.prompt_openai":
+    "OpenAI 互換接続のエンドポイント、必要な API キー、モデルを確認してください。",
   "chat.panel.permission.title": "権限が必要です",
   "chat.panel.permission.description":
     "アカウント -> 権限で、AI Chat の Kuku セッション利用を許可してください。",

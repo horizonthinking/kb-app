@@ -39,6 +39,8 @@ impl CompletionBackend for GeminiBackend {
         &self,
         request: CompletionTurnRequest,
     ) -> Result<CompletionTurnStream, AiError> {
+        // Gemini keeps its existing automatic tool-selection behavior.
+        let _ = request.tool_choice;
         // The desktop build pins the Gemini SKU in AiConfig. Per-turn model
         // overrides are ignored so no caller can drift away from that default.
         let model_name = self.model_id.clone();
@@ -128,14 +130,6 @@ impl CompletionBackend for GeminiBackend {
         };
 
         Ok(Box::pin(adapted))
-    }
-
-    async fn list_models(&self) -> Result<Vec<String>, AiError> {
-        Ok(vec![
-            "gemini-2.5-flash".to_string(),
-            "gemini-2.5-pro".to_string(),
-            "gemini-2.0-flash".to_string(),
-        ])
     }
 }
 

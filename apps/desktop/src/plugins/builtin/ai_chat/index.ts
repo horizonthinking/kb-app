@@ -19,7 +19,7 @@ const aiChatPlugin: KukuPlugin = {
   id: "ai-chat",
   name: "AI Chat",
   version: "0.1.0",
-  description: "Chat with Gemini from the right panel",
+  description: t("settings.plugin.ai_chat.description"),
   canDisable: true,
   dependencies: ["core-auth", "core-tool-registry"],
 

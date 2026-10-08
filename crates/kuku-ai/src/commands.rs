@@ -2,7 +2,7 @@ use tauri::{AppHandle, State, Wry, command};
 
 use crate::{
     AiConfig, AiState, ChatMode, EditorContext, NewSessionPayload, ProxyToolDescriptor,
-    ProxyToolResult, session,
+    ProxyToolResult, provider::openai, session,
 };
 
 #[command]
@@ -73,6 +73,16 @@ pub async fn ai_list_tools(
     state: State<'_, AiState>,
 ) -> Result<Vec<crate::ToolDescriptor>, String> {
     Ok(state.tool_descriptors())
+}
+
+#[command]
+pub async fn ai_list_models(
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<Vec<String>, String> {
+    openai::list_models(&base_url, api_key.as_deref())
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[command]

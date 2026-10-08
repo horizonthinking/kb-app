@@ -49,6 +49,9 @@ tasks:
     command: "cargo test -p kuku-ai"
     inputs:
       - "src/**/*.rs"
+      - "fixtures/**/*.json"
+      - "/scripts/h4/fixtures/**/*.json"
+      - "/scripts/h4/verify_ai_provider.sh"
       - "build.rs"
       - "Cargo.toml"
       - "/Cargo.toml"

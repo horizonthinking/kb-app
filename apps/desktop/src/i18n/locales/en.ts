@@ -204,15 +204,26 @@ export const EN_MESSAGES = {
   "settings.plugin.ai_chat.unsaved.inline_suffix": "at the top so chat can use this key.",
   "settings.plugin.ai_chat.guide.title": "Quick guide",
   "settings.plugin.ai_chat.guide.connection_label": "Connection:",
-  "settings.plugin.ai_chat.guide.connection_before_link":
-    "“Kuku” uses the account you’re signed in with. If you already use a Kuku account, that’s the easy path: sign in once and you’re good — you usually don’t need to tweak this page. “My Gemini API key” is for your own key from Google’s",
-  "settings.plugin.ai_chat.guide.connection_after_link": "(free tier is enough to try).",
   "settings.plugin.ai_chat.guide.save_label": "Save",
-  "settings.plugin.ai_chat.guide.save_text":
-    "after you change anything. A green or quiet success means you’re good.",
   "settings.plugin.ai_chat.guide.open_chat_label": "Open chat:",
-  "settings.plugin.ai_chat.guide.open_chat_text":
-    "use the right sidebar tab or the command to open the panel, then type in the box at the bottom.",
+  "settings.plugin.ai_chat.guide.gemini.connection":
+    "Create a personal API key in Google AI Studio, then paste it below.",
+  "settings.plugin.ai_chat.guide.gemini.save":
+    "Save after changing the key so chat can use it on this device.",
+  "settings.plugin.ai_chat.guide.gemini.open_chat":
+    "Open the right sidebar and send a message with Gemini.",
+  "settings.plugin.ai_chat.guide.openai.connection":
+    "Set a streaming Chat Completions base URL. OpenAI and Ollama are release-gated; LM Studio, mlx_lm.server, OpenRouter, and similar servers are expected to work.",
+  "settings.plugin.ai_chat.guide.openai.save":
+    "Load models if the server supports discovery, choose one, then save the connection.",
+  "settings.plugin.ai_chat.guide.openai.open_chat":
+    "Open the right sidebar and send a message with the selected compatible model.",
+  "settings.plugin.ai_chat.guide.remote.connection":
+    "Sign in to your Kuku account and authorize AI Chat.",
+  "settings.plugin.ai_chat.guide.remote.save":
+    "Choose Kuku and save; no local provider key is needed.",
+  "settings.plugin.ai_chat.guide.remote.open_chat":
+    "Open the right sidebar and chat through your Kuku session.",
   "settings.plugin.ai_chat.account_banner.title": "Have a Kuku account?",
   "settings.plugin.ai_chat.account_banner.description":
     "Log in and choose “Kuku (signed in)” — then chat just works; this screen is only for picking that mode, your key, or saving. Sign-in, session, and AI permissions are all in Account.",
@@ -222,11 +233,21 @@ export const EN_MESSAGES = {
     "Start with Kuku if you’re logged in. Switch to your own key only if you need it.",
   "settings.plugin.ai_chat.connection.option_remote": "Kuku (signed in) — easiest",
   "settings.plugin.ai_chat.connection.option_gemini": "My Gemini API key",
+  "settings.plugin.ai_chat.connection.option_openai": "OpenAI-compatible server",
   "settings.plugin.ai_chat.model.label": "Model",
   "settings.plugin.ai_chat.model.remote_description":
     "Currently uses Gemini 3.1 Flash Lite. This may change with app updates.",
   "settings.plugin.ai_chat.model.gemini_description":
     "Personal keys currently use Gemini 3.1 Flash Lite too. This may change with app updates.",
+  "settings.plugin.ai_chat.model.openai_description":
+    "Enter a model id exactly as your compatible server reports it.",
+  "settings.plugin.ai_chat.model.openai_placeholder": "gpt-5-nano or qwen3.5:4b",
+  "settings.plugin.ai_chat.models.load": "Load models",
+  "settings.plugin.ai_chat.models.loading": "Loading models…",
+  "settings.plugin.ai_chat.openai_base_url.label": "Base URL",
+  "settings.plugin.ai_chat.openai_base_url.description":
+    "Use HTTPS whenever a key is present. Keyless HTTP is allowed only for local or private hosts.",
+  "settings.plugin.ai_chat.openai_base_url.placeholder": "https://api.openai.com/v1",
   "settings.plugin.ai_chat.remote_banner.title": "While you’re on Kuku",
   "settings.plugin.ai_chat.remote_banner.description":
     "No API key in this screen — you already authorized the app with your Kuku / Google sign-in. If chat says it’s not allowed, check Account in settings.",
@@ -237,12 +258,21 @@ export const EN_MESSAGES = {
     "Create a key, copy it once — you won’t see the full value again.",
   "settings.plugin.ai_chat.gemini_banner.step3":
     "Paste it below, then press Save. The key stays in this app on this device.",
-  "settings.plugin.ai_chat.api_key.label": "Gemini API key",
+  "settings.plugin.ai_chat.api_key.label_gemini": "Gemini API key",
+  "settings.plugin.ai_chat.api_key.label_openai": "OpenAI-compatible API key",
   "settings.plugin.ai_chat.api_key.description":
     "The field is hidden by default. Use the eye to double-check you pasted the whole key.",
   "settings.plugin.ai_chat.api_key.placeholder": "Paste your key here",
   "settings.plugin.ai_chat.api_key.hide": "Hide key",
   "settings.plugin.ai_chat.api_key.show": "Show key",
+  "settings.plugin.ai_chat.api_key.requirement_required": "required",
+  "settings.plugin.ai_chat.api_key.requirement_optional": "optional",
+  "settings.plugin.ai_chat.openai_banner.key_title": "API key required",
+  "settings.plugin.ai_chat.openai_banner.key_description":
+    "This host requires an API key before chat can connect.",
+  "settings.plugin.ai_chat.openai_banner.model_title": "Model required",
+  "settings.plugin.ai_chat.openai_banner.model_description":
+    "Enter or load a model id, then save the settings.",
   "settings.plugin.ai_chat.tools.title": "What the AI can do",
   "settings.plugin.ai_chat.tools.description":
     "Tools the assistant can reach for on your behalf — searching notes, reading or editing files, and more. It will ask before destructive steps when needed.",
@@ -454,6 +484,8 @@ export const EN_MESSAGES = {
   "settings.about.version.unknown": "Unknown",
   "settings.about.metric.version": "Version",
   "settings.about.metric.license": "License",
+  "settings.about.h4_build": "H4 build {{label}}",
+  "settings.about.updates_via_homebrew": "updates via Homebrew",
 
   "app.title.vault_fallback": "Vault",
   "app.action.toggle_left_panel": "Toggle Left Panel",
@@ -610,13 +642,17 @@ export const EN_MESSAGES = {
   "chat.thinking": "Thinking",
   "chat.attachment.selected_text": "Selected text",
   "chat.panel.setup.title": "Set up AI Chat",
-  "chat.panel.setup.description": "Use a Gemini API key or sign in with your Kuku account.",
+  "chat.panel.setup.description": "Finish the selected provider setup before starting a chat.",
   "chat.panel.setup.opening": "Opening...",
   "chat.panel.setup.sign_in": "Sign in with Kuku",
   "chat.panel.setup.remote_hint": "Sign in once for Kuku Remote - no local API key on this device.",
   "chat.panel.setup.or": "or",
   "chat.panel.setup.open_settings": "Open Settings",
-  "chat.panel.setup.byok_hint": "Or add a Gemini key in Settings for BYOK on this device.",
+  "chat.panel.setup.byok_hint": "Or configure Gemini or an OpenAI-compatible server in Settings.",
+  "chat.panel.setup.prompt_remote": "Sign in and authorize AI Chat for your Kuku account.",
+  "chat.panel.setup.prompt_gemini": "Add and save a Gemini API key in Settings.",
+  "chat.panel.setup.prompt_openai":
+    "Check the endpoint, required API key, and model for this OpenAI-compatible connection.",
   "chat.panel.permission.title": "Permission required",
   "chat.panel.permission.description":
     "Allow AI Chat in Account -> Authorizations to use your Kuku session.",

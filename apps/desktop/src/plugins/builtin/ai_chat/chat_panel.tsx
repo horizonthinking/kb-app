@@ -1,139 +1,15 @@
 import { createEffect, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 
-import { chatState, loadConfig, saveConfig } from "./chat_store";
+import { chatState, loadConfig } from "./chat_store";
+import { normalizeAiConfig } from "./config";
+import { chatReadiness } from "./provider_readiness";
 import { ChatHeader } from "./components/chat_header";
 import { ChatInput } from "./components/chat_input";
 import { ChatMessages } from "./components/chat_messages";
+import { SetupGate } from "./components/setup_gate";
 import ScrollArea, { type ScrollAreaHandle } from "~/components/scroll_area";
-import { KukuIcon, SettingsIcon } from "~/components/icons";
-import { t } from "~/i18n";
-import { openSettings } from "~/stores/files";
 import { vaultDragState } from "~/stores/vault_drag";
 import { authState, getAuthService } from "~/plugins/builtin/core_auth/auth_service";
-
-function AccessPrompt(): JSX.Element {
-  const signInWithKuku = async () => {
-    if (chatState.config.saving || authState.loading) return;
-
-    if (chatState.config.provider !== "remote") {
-      await saveConfig("remote", chatState.config.apiKey, chatState.config.serverUrl);
-    }
-
-    openSettings({
-      kind: "plugin",
-      fillId: "core-auth.settings",
-      anchor: "session",
-    });
-
-    if (!authState.authenticated) {
-      await getAuthService()?.login();
-    }
-  };
-
-  return (
-    <div class="flex flex-1 flex-col items-center justify-center px-5 py-10">
-      <div class="w-full max-w-sm rounded-lg border border-border/70 bg-bg-secondary/80 p-8 text-center">
-        <div class="mb-1 inline-flex size-10 items-center justify-center rounded-lg border border-border/60 bg-bg-elevated text-text-secondary">
-          <KukuIcon size={22} />
-        </div>
-        <div class="mt-4 space-y-1.5">
-          <h2 class="text-lg font-semibold tracking-tight text-text-primary">
-            {t("chat.panel.setup.title")}
-          </h2>
-          <p class="mx-auto max-w-56 text-[0.8125rem] leading-relaxed text-text-secondary">
-            {t("chat.panel.setup.description")}
-          </p>
-        </div>
-
-        <div class="mt-6 flex flex-col items-stretch gap-2.5">
-          <button
-            type="button"
-            class="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-accent/35 bg-accent/12 px-4 text-sm font-medium text-accent transition hover:bg-accent/20 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={chatState.config.saving || authState.loading}
-            onClick={() => void signInWithKuku()}
-          >
-            <KukuIcon size={14} />
-            {authState.loading ? t("chat.panel.setup.opening") : t("chat.panel.setup.sign_in")}
-          </button>
-
-          <p class="text-[0.7rem] leading-relaxed text-text-muted">
-            {t("chat.panel.setup.remote_hint")}
-          </p>
-
-          <div class="flex w-full items-center gap-3 py-0.5">
-            <div class="h-px min-w-0 flex-1 bg-border" />
-            <span class="shrink-0 text-[0.65rem] font-medium tracking-widest text-text-muted uppercase">
-              {t("chat.panel.setup.or")}
-            </span>
-            <div class="h-px min-w-0 flex-1 bg-border" />
-          </div>
-
-          <button
-            type="button"
-            class="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-border/80 bg-bg-elevated px-4 text-sm font-medium text-text-primary transition hover:bg-ghost-hover active:scale-[0.99]"
-            onClick={() =>
-              openSettings({
-                kind: "plugin",
-                fillId: "ai-chat.settings",
-                anchor: "api-key",
-              })
-            }
-          >
-            <SettingsIcon size={14} />
-            {t("chat.panel.setup.open_settings")}
-          </button>
-
-          <p class="text-[0.7rem] leading-relaxed text-text-muted">
-            {t("chat.panel.setup.byok_hint")}
-          </p>
-        </div>
-
-        <Show when={authState.error}>
-          {(error) => <p class="mt-4 text-[0.7rem] text-error">{error()}</p>}
-        </Show>
-        <Show when={chatState.config.error}>
-          {(error) => <p class="mt-2 text-[0.7rem] text-error">{error()}</p>}
-        </Show>
-      </div>
-    </div>
-  );
-}
-
-function RemotePermissionPrompt(): JSX.Element {
-  return (
-    <div class="flex flex-1 flex-col items-center justify-center px-5 py-10">
-      <div class="w-full max-w-sm rounded-lg border border-border/70 bg-bg-secondary/80 p-8 text-center">
-        <div class="mb-1 inline-flex size-10 items-center justify-center rounded-lg border border-warning-border/50 bg-warning-bg text-warning">
-          <SettingsIcon size={22} />
-        </div>
-
-        <div class="mt-4 space-y-1.5">
-          <h2 class="text-lg font-semibold tracking-tight text-text-primary">
-            {t("chat.panel.permission.title")}
-          </h2>
-          <p class="mx-auto max-w-56 text-[0.8125rem] leading-relaxed text-text-secondary">
-            {t("chat.panel.permission.description")}
-          </p>
-        </div>
-
-        <button
-          type="button"
-          class="mt-6 inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg border border-accent/35 bg-accent/12 px-4 text-sm font-medium text-accent transition hover:bg-accent/20 active:scale-[0.99]"
-          onClick={() =>
-            openSettings({
-              kind: "plugin",
-              fillId: "core-auth.settings",
-              anchor: "authorizations",
-            })
-          }
-        >
-          <SettingsIcon size={14} />
-          {t("chat.panel.setup.open_settings")}
-        </button>
-      </div>
-    </div>
-  );
-}
 
 // ── Main Chat Panel ──
 
@@ -144,16 +20,6 @@ function ChatPanel(): JSX.Element {
   let userScrolledAway = false;
   /** After programmatic scroll, ignore a few onScrolls so "follow" is not lost. */
   let ignoreScrollEvents = 0;
-
-  const isApiKeyMissing = () =>
-    chatState.config.provider === "gemini" && !chatState.config.loading && !chatState.config.apiKey;
-  const needsRemoteLogin = () =>
-    chatState.config.provider === "remote" && !chatState.config.loading && !authState.authenticated;
-  const needsRemotePermission = () =>
-    chatState.config.provider === "remote" &&
-    !chatState.config.loading &&
-    authState.authenticated &&
-    !getAuthService()?.isPluginAuthorized("ai-chat");
 
   // Reload config when panel mounts so we pick up changes made in Settings.
   onMount(() => {
@@ -332,8 +198,15 @@ function ChatPanel(): JSX.Element {
       </Show>
       <ChatHeader />
 
-      <Show when={!(isApiKeyMissing() || needsRemoteLogin())} fallback={<AccessPrompt />}>
-        <Show when={!needsRemotePermission()} fallback={<RemotePermissionPrompt />}>
+      <SetupGate
+        provider={chatState.config.provider}
+        readiness={chatReadiness(
+          normalizeAiConfig(chatState.config.rawConfig),
+          authState.authenticated,
+          getAuthService()?.isPluginAuthorized("ai-chat") ?? false,
+        )}
+      >
+        <div class="flex min-h-0 flex-1 flex-col">
           <ScrollArea
             axis="y"
             class="min-h-0 flex-1"
@@ -359,8 +232,8 @@ function ChatPanel(): JSX.Element {
           </ScrollArea>
 
           <ChatInput />
-        </Show>
-      </Show>
+        </div>
+      </SetupGate>
     </div>
   );
 }
